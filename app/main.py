@@ -29,16 +29,19 @@ app.include_router(router)
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
+    connect_sources = ["'self'"]
+    if settings.s3_upload_bucket:
+        connect_sources.append(f"https://{settings.s3_upload_bucket}.s3.amazonaws.com")
+    content_security_policy = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        f"font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src {' '.join(connect_sources)}; "
+        "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests"
+    )
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-    response.headers.setdefault(
-        "Content-Security-Policy",
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; "
-        "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests",
-    )
+    response.headers.setdefault("Content-Security-Policy", content_security_policy)
     if settings.app_env.lower() == "production":
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     if request.url.path in {"/", "/index.html"}:
