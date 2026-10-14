@@ -61,7 +61,20 @@ try {
     Get-ChildItem -LiteralPath $sourceStage -Recurse -Directory -Filter '__pycache__' | Remove-Item -Recurse -Force
     Get-ChildItem -LiteralPath $sourceStage -Recurse -File -Filter '*.pyc' | Remove-Item -Force
     $sourceZip = Join-Path $env:TEMP ("clickpe-bundle-" + [guid]::NewGuid().ToString('N') + '.zip')
-    Compress-Archive -Path (Join-Path $sourceStage '*') -DestinationPath $sourceZip -CompressionLevel Optimal
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $sourceStage,
+        $sourceZip,
+        [System.IO.Compression.CompressionLevel]::Optimal,
+        $false
+    )
+    $bundle = [System.IO.Compression.ZipFile]::OpenRead($sourceZip)
+    try {
+        if ($bundle.Entries | Where-Object { $_.FullName.Contains('\') }) {
+            throw 'The application bundle contains non-portable ZIP paths.'
+        }
+    }
+    finally { $bundle.Dispose() }
     try {
         & aws s3 cp $sourceZip ("s3://{0}/deployment/source.zip" -f $outputs.UploadBucketName) --profile $AwsProfile --region ap-south-1 --sse AES256
         if ($LASTEXITCODE -ne 0) { throw 'Could not upload the private EC2 application bundle.' }
