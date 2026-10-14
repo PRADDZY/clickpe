@@ -76,8 +76,15 @@ try {
             $archiveStream,
             [System.IO.Compression.ZipArchiveMode]::Create
         )
+        $stageLeaf = Split-Path -Leaf $sourceStage
         foreach ($file in Get-ChildItem -LiteralPath $sourceStage -Recurse -File) {
-            $entryName = $file.FullName.Substring($sourceStage.Length).TrimStart([char[]]@([char]92, [char]47)).Replace('\', '/')
+            $fileParts = @($file.FullName -split '[\\/]')
+            $stageIndex = [Array]::IndexOf($fileParts, $stageLeaf)
+            if ($stageIndex -lt 0 -or [Array]::IndexOf($fileParts, $stageLeaf, [int]($stageIndex + 1)) -ge 0) {
+                throw 'Could not resolve a file path relative to the application bundle root.'
+            }
+            $relativeParts = @($fileParts[($stageIndex + 1)..($fileParts.Length - 1)])
+            $entryName = [string]::Join('/', $relativeParts)
             if (-not $entryName -or $entryName.StartsWith('/') -or $entryName -match '(^|/)\.\.(/|$)') {
                 throw 'The application bundle contains an unsafe ZIP path.'
             }
@@ -98,6 +105,9 @@ try {
     try {
         if ($bundle.Entries | Where-Object { $_.FullName.Contains('\') }) {
             throw 'The application bundle contains non-portable ZIP paths.'
+        }
+        if (-not ($bundle.Entries | Where-Object { $_.FullName -ceq 'docker-compose.yml' })) {
+            throw 'The application bundle is missing docker-compose.yml at its root.'
         }
     }
     finally { $bundle.Dispose() }
