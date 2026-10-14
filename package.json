@@ -1,0 +1,14 @@
+{
+  "name": "clickpe-loan-eligibility-engine-infra",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "powershell -ExecutionPolicy Bypass -File scripts/Deploy-Aws.ps1",
+    "package": "powershell -ExecutionPolicy Bypass -File scripts/Package-Aws.ps1",
+    "quality": "npm --prefix web run build"
+  },
+  "devDependencies": {
+    "serverless": "3.40.0",
+    "serverless-iam-roles-per-function": "3.2.0"
+  }
+}
