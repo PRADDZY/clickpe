@@ -78,7 +78,15 @@ services:
     depends_on:
       api: {condition: service_healthy}
     networks: [internal]
-    command: ["sh", "-c", "if [ ! -f /home/node/.n8n/.seed-imported ]; then n8n import:workflow --separate --input=/seed/workflows && touch /home/node/.n8n/.seed-imported; fi; n8n start"]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ ! -f /home/node/.n8n/.seed-imported ]; then
+          n8n import:workflow --separate --input=/seed/workflows
+          touch /home/node/.n8n/.seed-imported
+        fi
+        exec n8n start
 
   runner:
     image: n8nio/runners:2.43.5
