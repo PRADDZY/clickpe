@@ -1,0 +1,57 @@
+{
+  "name": "03 · Prepare notification preview",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "notification-preview",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": { "allowedOrigins": "" }
+      },
+      "id": "a1167d84-378b-4a8f-8d6b-13c10a8ba688",
+      "name": "Receive completed run",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 260],
+      "webhookId": "4ba0a872-6c40-4290-a911-9fa2b64281df"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH written AS (INSERT INTO notification_event (run_id,user_id,product_id,channel,mode,status,idempotency_key) SELECT e.run_id,e.user_id,e.product_id,'email','preview','previewed',e.run_id::text||':'||e.user_id||':'||e.product_id||':preview' FROM eligibility_result e WHERE e.run_id=$1::uuid AND e.decision='eligible' ON CONFLICT (idempotency_key) DO NOTHING RETURNING event_id) SELECT $1::text AS run_id,COUNT(n.event_id) AS eligible_matches,COUNT(DISTINCT lower(u.email)) AS distinct_email_addresses,COUNT(DISTINCT (u.run_id,u.user_id)) AS distinct_applicants,COUNT(DISTINCT w.event_id) AS new_preview_events,'preview'::text AS mode,FALSE AS delivery_enabled FROM notification_event n JOIN batch_user u ON u.run_id=n.run_id AND u.user_id=n.user_id LEFT JOIN written w ON TRUE WHERE n.run_id=$1::uuid AND n.mode='preview' AND n.status='previewed'",
+        "options": { "queryReplacement": "={{ [$json.body.run_id] }}" }
+      },
+      "id": "454a5cb0-71fc-411f-a585-e0e546034076",
+      "name": "Store deduplicated preview only · Postgres",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [500, 260]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const result=$input.first().json;\nreturn [{json:{run_id:result.run_id,mode:'preview',eligible_matches:Number(result.eligible_matches),distinct_email_addresses:Number(result.distinct_email_addresses),distinct_applicants:Number(result.distinct_applicants),new_preview_events:Number(result.new_preview_events),delivery_enabled:false,note:'Preview records only. No emails or messages are sent.'}}];"
+      },
+      "id": "25f498a2-d20f-43d7-bfad-c8c11ebf6515",
+      "name": "Summarize without addresses · Code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 260]
+    }
+  ],
+  "connections": {
+    "Receive completed run": { "main": [[{ "node": "Store deduplicated preview only · Postgres", "type": "main", "index": 0 }]] },
+    "Store deduplicated preview only · Postgres": { "main": [[{ "node": "Summarize without addresses · Code", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": false,
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveExecutionProgress": false
+  },
+  "versionId": "a84f868b-8c4a-4870-b2bf-81f3e41d2c0c",
+  "meta": { "templateCredsSetupCompleted": false }
+}

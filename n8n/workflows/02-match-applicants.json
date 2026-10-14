@@ -1,0 +1,78 @@
+{
+  "name": "02 · Match applicant batches",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "match-run",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": { "allowedOrigins": "" }
+      },
+      "id": "86ca632c-b61a-480c-91ea-c19ee781f8be",
+      "name": "Receive queued run",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "7c23294a-3764-498e-a95a-e9899d778f68"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH page AS MATERIALIZED (SELECT user_id,monthly_income,credit_score,employment_status,age FROM batch_user WHERE run_id=$1::uuid AND user_id>$2 ORDER BY user_id LIMIT 201), ordered AS (SELECT page.*,row_number() OVER (ORDER BY user_id) AS seq FROM page), enriched AS (SELECT $1::text AS run_id,u.user_id,u.monthly_income,u.credit_score,u.employment_status,u.age,u.seq,jsonb_build_object('user_id',u.user_id,'monthly_income',u.monthly_income,'credit_score',u.credit_score,'employment_status',u.employment_status,'age',u.age,'products',COALESCE((SELECT jsonb_agg(jsonb_build_object('product_id',p.product_id,'snapshot_id',s.snapshot_id::text,'rules',s.rules) ORDER BY p.product_id) FROM product p JOIN policy_snapshot s ON s.snapshot_id=p.current_snapshot_id WHERE p.active AND s.extraction_status='approved'),'[]'::jsonb)) AS profile FROM ordered u) SELECT $1::text AS run_id,COALESCE(jsonb_agg(profile ORDER BY user_id) FILTER (WHERE seq<=200),'[]'::jsonb) AS users,COUNT(*)>200 AS has_more,COALESCE(MAX(user_id) FILTER (WHERE seq<=200),$2::text) AS last_user_id FROM enriched",
+        "options": { "queryReplacement": "={{ [$json.body.run_id, $json.body.cursor_user_id || ''] }}" }
+      },
+      "id": "e0503611-ed46-4427-a385-96190bf7424c",
+      "name": "Fetch up to 200 profiles · Postgres",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const row = $input.first().json;\nconst users = typeof row.users === 'string' ? JSON.parse(row.users) : (row.users || []);\nconst results = [];\nfor (const user of users) {\n  for (const product of (user.products || [])) {\n    const rules = typeof product.rules === 'string' ? JSON.parse(product.rules) : product.rules;\n    const reasons = [];\n    let hardFailure = false;\n    let unresolved = false;\n    const add = (criterion,status,extra={}) => reasons.push({criterion,status,...extra});\n    const employment = rules.employment || {};\n    if (employment.kind === 'required') {\n      const pass = user.employment_status === employment.status;\n      add('employment_status',pass?'pass':'fail',{required_value:employment.status,observed_value:user.employment_status});\n      if (!pass) hardFailure = true;\n    } else { unresolved = true; add('employment_status','unknown',{message:'This product employment rule needs confirmation.'}); }\n    const age = rules.age || {};\n    if (age.kind === 'required') {\n      const pass = Number.isInteger(Number(user.age)) && Number(user.age) >= age.min && Number(user.age) <= age.max;\n      add('age',pass?'pass':'fail',{minimum:age.min,maximum:age.max,observed_value:user.age});\n      if (!pass) hardFailure = true;\n    } else { unresolved = true; add('age','unknown',{message:'The official source does not establish the age criteria.'}); }\n    const income = rules.monthly_income || {};\n    if (income.kind === 'required' && !income.location_dependent) {\n      const value = Number(user.monthly_income);\n      const pass = Number.isFinite(value) && value >= income.min;\n      add('monthly_income',pass?'pass':'fail',{minimum:income.min,currency:income.currency||'INR'});\n      if (!pass) hardFailure = true;\n    } else { unresolved = true; add('monthly_income','unknown',{message:'Location-specific income terms cannot be checked from this file.'}); }\n    const score = rules.credit_score || {};\n    if (score.kind === 'required') {\n      const pass = Number.isInteger(Number(user.credit_score)) && Number(user.credit_score) >= score.min;\n      add('credit_score',pass?'pass':'fail',{minimum:score.min,observed_value:user.credit_score});\n      if (!pass) hardFailure = true;\n    } else if (score.kind === 'preferred') {\n      const pass = Number.isInteger(Number(user.credit_score)) && Number(user.credit_score) >= score.min;\n      add('credit_score',pass?'pass':'review',{preferred_minimum:score.min,observed_value:user.credit_score,message:'The source describes this as preferred, not a hard cutoff.'});\n      if (!pass) unresolved = true;\n    } else { unresolved = true; add('credit_score','unknown',{message:'The official source does not establish a score cutoff.'}); }\n    results.push({user_id:user.user_id,product_id:product.product_id,snapshot_id:product.snapshot_id,decision:hardFailure?'ineligible':unresolved?'review':'eligible',reasons,rule_version:'rules-v1'});\n  }\n}\nreturn [{json:{run_id:row.run_id,results,last_user_id:row.last_user_id,has_more:row.has_more}}];"
+      },
+      "id": "2eef828d-7f13-42a7-bfa7-9c2c47962dfd",
+      "name": "Evaluate confirmed rules · Code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [740, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://api:8000/internal/v1/save-match-batch",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": { "timeout": 30000, "response": { "response": { "neverError": false } } }
+      },
+      "id": "26313f50-7250-4d70-960a-4e28a50db9a1",
+      "name": "Persist explained decisions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1010, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1500
+    }
+  ],
+  "connections": {
+    "Receive queued run": { "main": [[{ "node": "Fetch up to 200 profiles · Postgres", "type": "main", "index": 0 }]] },
+    "Fetch up to 200 profiles · Postgres": { "main": [[{ "node": "Evaluate confirmed rules · Code", "type": "main", "index": 0 }]] },
+    "Evaluate confirmed rules · Code": { "main": [[{ "node": "Persist explained decisions", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": false,
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveExecutionProgress": false
+  },
+  "versionId": "aeed5161-9b1e-4e8a-ae37-d4792f614cea",
+  "meta": { "templateCredsSetupCompleted": false }
+}
