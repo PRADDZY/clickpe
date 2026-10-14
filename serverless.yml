@@ -479,6 +479,8 @@ resources:
               set -euo pipefail
               dnf install -y docker unzip jq
               install -d -m 0755 /usr/local/lib/docker/cli-plugins /opt/clickpe
+              curl --fail --location --retry 5 --retry-delay 2 https://github.com/docker/buildx/releases/download/v0.16.2/buildx-v0.16.2.linux-arm64 --output /usr/local/lib/docker/cli-plugins/docker-buildx
+              chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
               curl --fail --location --retry 5 --retry-delay 2 https://github.com/docker/compose/releases/download/v2.40.1/docker-compose-linux-aarch64 --output /usr/local/lib/docker/cli-plugins/docker-compose
               chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
               systemctl enable --now docker
