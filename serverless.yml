@@ -56,9 +56,11 @@ package:
   artifact: .aws-build/loan-engine.zip
   patterns:
     - app/**
+    - web/dist/**
     - migrations/*.sql
     - '!tests/**'
-    - '!web/**'
+    - '!web/src/**'
+    - '!web/node_modules/**'
     - '!n8n/**'
     - '!users.csv'
     - '!*.docx'
@@ -76,6 +78,9 @@ functions:
       - httpApi:
           path: /{proxy+}
           method: ANY
+      - httpApi:
+          path: /
+          method: GET
     iamRoleStatementsName: clickpe-api-${sls:stage}
     iamRoleStatements:
       - Effect: Allow
@@ -407,7 +412,8 @@ resources:
             - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
         CorsConfiguration:
           CorsRules:
-            - AllowedOrigins: ["${env:WEB_ORIGIN, 'http://localhost:3000'}"]
+            - AllowedOrigins:
+                - "${env:WEB_ORIGIN, 'http://localhost:3000'}"
               AllowedMethods: [POST]
               AllowedHeaders: ['*']
               ExposedHeaders: [ETag]
