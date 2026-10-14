@@ -6,7 +6,7 @@ import {
   Search, ShieldCheck, UploadCloud, X,
 } from 'lucide-react'
 
-const API = import.meta.env.VITE_API_BASE_URL === undefined ? 'http://localhost:8000' : import.meta.env.VITE_API_BASE_URL
+const API = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? 'http://localhost:8000' : '')
 type Decision = 'eligible' | 'ineligible' | 'review'
 type Run = {
   run_id: string; status: string; row_count: number; duplicate_email_count: number
