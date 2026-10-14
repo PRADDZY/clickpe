@@ -9,13 +9,11 @@ dependencies = [
   "mangum>=0.19,<1",
   "psycopg[binary,pool]>=3.2,<4",
   "pydantic-settings>=2.10,<3",
-  "httpx>=0.28,<1",
-  "beautifulsoup4>=4.13,<5",
   "python-multipart>=0.0.20,<1",
-  "uvicorn[standard]>=0.35,<1",
 ]
 
 [project.optional-dependencies]
+server = ["httpx>=0.28,<1", "uvicorn[standard]>=0.35,<1"]
 dev = ["pytest>=8.4,<9", "pytest-cov>=6.2,<7", "ruff>=0.12,<1", "mypy>=1.17,<2", "httpx>=0.28,<1"]
 
 [tool.pytest.ini_options]

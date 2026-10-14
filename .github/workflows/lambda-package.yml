@@ -1,0 +1,47 @@
+name: Build Lambda package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Export locked runtime dependencies
+        run: uv export --locked --no-dev --no-hashes --no-emit-project --format requirements.txt --output-file requirements.txt
+      - name: Build the Linux Lambda archive
+        shell: bash
+        run: |
+          package="$RUNNER_TEMP/clickpe-lambda"
+          mkdir -p "$package/app" "$package/migrations" .aws-build
+          uv pip install --python 3.12 --target "$package" --only-binary :all: --requirements requirements.txt
+          cp -R app/. "$package/app/"
+          cp migrations/*.sql "$package/migrations/"
+          find "$package" -type d -name __pycache__ -prune -exec rm -rf {} +
+          find "$package" -type f -name '*.pyc' -delete
+          (cd "$package" && zip -qr "$GITHUB_WORKSPACE/.aws-build/loan-engine.zip" .)
+          python - <<'PY'
+          from zipfile import ZipFile
+
+          with ZipFile(".aws-build/loan-engine.zip") as bundle:
+              names = bundle.namelist()
+              assert "app/lambda_handlers.py" in names
+              assert "migrations/003_upload_processing_lease.sql" in names
+              assert not any(name.lower().endswith((".csv", ".docx", ".png")) for name in names)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clickpe-lambda
+          path: .aws-build/loan-engine.zip
+          if-no-files-found: error
+          retention-days: 3
