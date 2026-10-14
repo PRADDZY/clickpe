@@ -407,7 +407,7 @@ resources:
             - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
         CorsConfiguration:
           CorsRules:
-            - AllowedOrigins: [http://localhost:5173, http://localhost:3000, "${env:WEB_ORIGIN, 'http://localhost:3000'}"]
+            - AllowedOrigins: ["${env:WEB_ORIGIN, 'http://localhost:3000'}"]
               AllowedMethods: [POST]
               AllowedHeaders: ['*']
               ExposedHeaders: [ETag]
