@@ -61,13 +61,38 @@ try {
     Get-ChildItem -LiteralPath $sourceStage -Recurse -Directory -Filter '__pycache__' | Remove-Item -Recurse -Force
     Get-ChildItem -LiteralPath $sourceStage -Recurse -File -Filter '*.pyc' | Remove-Item -Force
     $sourceZip = Join-Path $env:TEMP ("clickpe-bundle-" + [guid]::NewGuid().ToString('N') + '.zip')
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        $sourceStage,
+    $archiveStream = [System.IO.File]::Open(
         $sourceZip,
-        [System.IO.Compression.CompressionLevel]::Optimal,
-        $false
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None
     )
+    $bundle = $null
+    try {
+        $bundle = [System.IO.Compression.ZipArchive]::new(
+            $archiveStream,
+            [System.IO.Compression.ZipArchiveMode]::Create
+        )
+        foreach ($file in Get-ChildItem -LiteralPath $sourceStage -Recurse -File) {
+            $entryName = $file.FullName.Substring($sourceStage.Length).TrimStart([char[]]@([char]92, [char]47)).Replace('\', '/')
+            if (-not $entryName -or $entryName.StartsWith('/') -or $entryName -match '(^|/)\.\.(/|$)') {
+                throw 'The application bundle contains an unsafe ZIP path.'
+            }
+            $entry = $bundle.CreateEntry($entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+            $inputStream = $file.OpenRead()
+            $entryStream = $entry.Open()
+            try { $inputStream.CopyTo($entryStream) }
+            finally {
+                $entryStream.Dispose()
+                $inputStream.Dispose()
+            }
+        }
+    }
+    finally {
+        if ($bundle) { $bundle.Dispose() } else { $archiveStream.Dispose() }
+    }
     $bundle = [System.IO.Compression.ZipFile]::OpenRead($sourceZip)
     try {
         if ($bundle.Entries | Where-Object { $_.FullName.Contains('\') }) {
