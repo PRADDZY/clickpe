@@ -1,3 +1,4 @@
+param([string] $AwsProfile = 'dpratik', [string] $LambdaArtifactPath = '')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $serverlessCli = Join-Path $projectRoot 'node_modules\.bin\serverless.cmd'
@@ -21,4 +22,3 @@ try {
     Write-Output 'AWS deployment package is ready in .serverless.'
 }
 finally { Pop-Location }
-param([string] $AwsProfile = 'dpratik', [string] $LambdaArtifactPath = '')
