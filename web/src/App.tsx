@@ -5,13 +5,17 @@ import {
   FolderClock, LockKeyhole, LogOut, MoreHorizontal, RotateCw,
   Search, ShieldCheck, UploadCloud, X,
 } from 'lucide-react'
+import './upload-feedback.css'
 
 const API = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? 'http://localhost:8000' : '')
 type Decision = 'eligible' | 'ineligible' | 'review'
 type Run = {
   run_id: string; status: string; row_count: number; duplicate_email_count: number
   matched_count: number; unmatched_count: number; review_count: number; created_at: string
+  error_code?: string | null
 }
+type UploadStatus = { status: string; run_id: string | null; error_code: string | null }
+type UploadFeedback = { tone: 'info' | 'success' | 'error'; message: string }
 type Product = {
   product_id: string; lender: string; product_name: string; product_url: string
   observed_at: string | null; extraction_status: string | null
@@ -28,6 +32,21 @@ type Match = {
 }
 
 const fmt = (value: number) => new Intl.NumberFormat('en-IN').format(value || 0)
+const uploadErrorMessages: Record<string, string> = {
+  empty_csv: 'The CSV has no applicant rows.',
+  file_too_large: 'The CSV exceeds the 25 MiB upload limit.',
+  import_failed: 'The CSV reached storage, but the database could not import it.',
+  ingest_retryable: 'The importer hit a temporary error and is retrying.',
+  invalid_csv: 'The CSV could not be parsed. Check its formatting and try again.',
+  invalid_csv_schema: 'Use these columns: user_id, name, email, monthly_income, credit_score, employment_status, age.',
+  invalid_encoding: 'Save the CSV as UTF-8, then try again.',
+  invalid_row: 'At least one row has a missing or invalid value. Check the CSV and try again.',
+  matching_failed: 'The CSV imported, but eligibility matching failed. Check the run details.',
+  too_many_rows: 'The CSV exceeds the 100,000 row limit.',
+  upload_not_found: 'The importer could not find this upload. Please try again.',
+  workflow_unavailable: 'The CSV imported, but the matching workflow is unavailable.',
+}
+const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds))
 const relative = (value: string) => {
   const seconds = Math.round((Date.now() - new Date(value).getTime()) / 1000)
   if (seconds < 60) return 'Just now'
@@ -47,6 +66,7 @@ export default function App() {
   const [filter, setFilter] = useState<'all' | Decision>('all')
   const [authError, setAuthError] = useState('')
   const [error, setError] = useState('')
+  const [uploadFeedback, setUploadFeedback] = useState<UploadFeedback | null>(null)
   const [loading, setLoading] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [preview, setPreview] = useState<{ eligible_matches: number; distinct_email_addresses: number } | null>(null)
@@ -68,13 +88,15 @@ export default function App() {
     return response.json()
   }
 
-  const refresh = async () => {
+  const refresh = async (preferredRunId?: string) => {
     if (!token) return
     try {
       const data = await request('/api/dashboard') as Dashboard
       const policies = await request('/api/policies/pending') as PendingPolicy[]
       setDashboard(data); setPendingPolicies(policies); setError('')
-      if (!selectedRun && data.runs.length) setSelectedRun(data.runs[0])
+      const preferredRun = preferredRunId ? data.runs.find((run) => run.run_id === preferredRunId) : null
+      if (preferredRun) setSelectedRun(preferredRun)
+      else if (!selectedRun && data.runs.length) setSelectedRun(data.runs[0])
       else if (selectedRun) setSelectedRun(data.runs.find((r) => r.run_id === selectedRun.run_id) || selectedRun)
     } catch (e) { if ((e as Error).message !== 'Session expired') setError((e as Error).message) }
   }
@@ -111,9 +133,11 @@ export default function App() {
 
   const upload = async (file?: File) => {
     if (!file) return
-    if (!file.name.toLowerCase().endsWith('.csv')) { setError('Choose a .csv file.'); return }
-    if (dashboard && file.size > dashboard.max_upload_bytes) { setError('That CSV exceeds the 25 MiB upload limit.'); return }
+    if (!file.name.toLowerCase().endsWith('.csv')) { setUploadFeedback({ tone: 'error', message: 'Choose a .csv file.' }); return }
+    if (dashboard && file.size > dashboard.max_upload_bytes) { setUploadFeedback({ tone: 'error', message: 'That CSV exceeds the 25 MiB upload limit.' }); return }
     setLoading(true); setError(''); setPreview(null)
+    setUploadFeedback({ tone: 'info', message: `Preparing ${file.name}…` })
+    let uploadStage: 'api' | 'storage' | 'processing' = 'api'
     try {
       let data: { upload_id: string }
       if (dashboard?.storage_mode === 's3') {
@@ -121,16 +145,50 @@ export default function App() {
         const form = new FormData()
         Object.entries(signed.upload.fields as Record<string, string>).forEach(([key, value]) => form.append(key, value))
         form.append('file', file)
+        uploadStage = 'storage'
+        setUploadFeedback({ tone: 'info', message: 'Sending the CSV to secure storage…' })
         const uploaded = await fetch(signed.upload.url as string, { method: 'POST', body: form })
-        if (!uploaded.ok) throw new Error('Object storage rejected the CSV upload. Try again or check the cloud upload configuration.')
+        if (!uploaded.ok) throw new Error(`Storage rejected the CSV upload (HTTP ${uploaded.status}). Try again or share that status.`)
         data = { upload_id: signed.upload_id as string }
       } else {
         const body = new FormData(); body.append('file', file)
         data = await request('/api/uploads/local', { method: 'POST', body })
       }
-      setError(`Upload accepted · ${data.upload_id.slice(0, 8)} · processing in the background`)
-      window.setTimeout(() => void refresh(), 1000)
-    } catch (e) { setError((e as Error).message) }
+      uploadStage = 'processing'
+      setUploadFeedback({ tone: 'info', message: `Upload received · ${data.upload_id.slice(0, 8)} · waiting for import…` })
+      const deadline = Date.now() + 60_000
+      while (Date.now() < deadline) {
+        const status = await request(`/api/uploads/${data.upload_id}`) as UploadStatus
+        if (status.status === 'failed') {
+          const detail = status.error_code ? uploadErrorMessages[status.error_code] || `Import failed (${status.error_code}).` : 'Import failed. Please try again.'
+          throw new Error(detail)
+        }
+        if (status.run_id) {
+          const run = await request(`/api/runs/${status.run_id}`) as Run
+          await refresh(status.run_id)
+          if (status.status === 'completed' || run.status === 'completed') {
+            setUploadFeedback({ tone: 'success', message: `Analysis complete · ${fmt(run.row_count)} applicant profiles processed.` })
+          } else if (run.status === 'failed') {
+            const detail = run.error_code ? uploadErrorMessages[run.error_code] || `Matching failed (${run.error_code}).` : 'Matching failed. Check the run details.'
+            setUploadFeedback({ tone: 'error', message: detail })
+          } else {
+            setUploadFeedback({ tone: 'success', message: `CSV imported · ${fmt(run.row_count)} profiles · matching is ${run.status}.` })
+          }
+          return
+        }
+        setUploadFeedback({ tone: 'info', message: status.status === 'processing' ? 'CSV received · importing applicant rows…' : 'CSV received · waiting for the importer…' })
+        await wait(1500)
+      }
+      setUploadFeedback({ tone: 'error', message: `Storage received the file, but import is not confirmed yet. Reference ${data.upload_id.slice(0, 8)}; refresh the workspace shortly.` })
+    } catch (e) {
+      const message = (e as Error).message
+      const networkMessage = uploadStage === 'api'
+        ? 'The browser could not reach the upload API. Check the failed Network request and try again.'
+        : uploadStage === 'storage'
+          ? 'The browser could not reach storage. Check the failed Network request and try again.'
+          : 'The file may be in storage, but the workspace could not check its import status. Refresh and retry if needed.'
+      setUploadFeedback({ tone: 'error', message: message === 'Failed to fetch' ? networkMessage : message })
+    }
     finally { setLoading(false); if (fileInput.current) fileInput.current.value = '' }
   }
 
@@ -178,7 +236,7 @@ export default function App() {
         <section className="metric-grid" aria-label="Selected run metrics">{metrics.map(({ label, value, caption, icon: Icon, tone }) => <article key={label} className="metric-card"><div className="metric-top"><span>{label}</span><div className={`metric-icon ${tone}`}><Icon size={17} /></div></div><div className="metric-value">{value}</div><div className="metric-caption">{caption}</div></article>)}</section>
 
         <div className="workspace-grid">
-          <section className="panel upload-panel"><div className="panel-heading"><div><div className="section-kicker">NEW ANALYSIS</div><h2>Import applicant profiles</h2></div><span className="format-badge">CSV · UP TO 25 MB</span></div><p className="panel-desc">Upload the standard applicant file to evaluate profiles against the active lender policies.</p><div className={`dropzone ${dragging ? 'drag-over' : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={(e) => { e.preventDefault(); setDragging(false); void upload(e.dataTransfer.files[0]) }}><div className="upload-icon"><UploadCloud size={21} /></div><strong>{loading ? 'Preparing your upload…' : 'Drop your CSV file here'}</strong><span>or browse files from your device</span><button className="button primary browse-button" disabled={loading} onClick={() => fileInput.current?.click()}>{loading ? 'Uploading' : 'Browse files'} {!loading && <ArrowRight size={14} />}</button><input ref={fileInput} type="file" accept=".csv,text/csv" hidden onChange={(e) => void upload(e.target.files?.[0])} /></div><div className="privacy-note"><ShieldCheck size={15} /><span>Names and email addresses stay inside the application database. The matcher sees eligibility fields only.</span></div></section>
+          <section className="panel upload-panel"><div className="panel-heading"><div><div className="section-kicker">NEW ANALYSIS</div><h2>Import applicant profiles</h2></div><span className="format-badge">CSV · UP TO 25 MB</span></div><p className="panel-desc">Upload the standard applicant file to evaluate profiles against the active lender policies.</p><div className={`dropzone ${dragging ? 'drag-over' : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={(e) => { e.preventDefault(); setDragging(false); void upload(e.dataTransfer.files[0]) }}><div className="upload-icon"><UploadCloud size={21} /></div><strong>{loading ? 'Preparing your upload…' : 'Drop your CSV file here'}</strong><span>or browse files from your device</span><button className="button primary browse-button" disabled={loading} onClick={() => fileInput.current?.click()}>{loading ? 'Uploading' : 'Browse files'} {!loading && <ArrowRight size={14} />}</button><input ref={fileInput} type="file" accept=".csv,text/csv" hidden onChange={(e) => void upload(e.target.files?.[0])} /></div>{uploadFeedback && <div role={uploadFeedback.tone === 'error' ? 'alert' : 'status'} className={`alert ${uploadFeedback.tone} upload-feedback`}>{uploadFeedback.message}</div>}<div className="privacy-note"><ShieldCheck size={15} /><span>Names and email addresses stay inside the application database. The matcher sees eligibility fields only.</span></div></section>
 
           <section className="panel activity-panel"><div className="panel-heading"><div><div className="section-kicker">RECENT ACTIVITY</div><h2>Your latest runs</h2></div><button className="icon-button small" title="Refresh runs" onClick={() => void refresh()}><RotateCw size={15} /></button></div>{dashboard?.runs.length ? <div className="run-list">{dashboard.runs.slice(0, 5).map((run) => <button key={run.run_id} className={`run-row ${selectedRun?.run_id === run.run_id ? 'selected' : ''}`} onClick={() => { setSelectedRun(run); setPreview(null) }}><span className={`run-icon ${run.status}`}><FileText size={16} /></span><span className="run-meta"><strong>Portfolio analysis</strong><small>{fmt(run.row_count)} applicants · {relative(run.created_at)}</small></span><span className={`status-pill ${run.status}`}>{run.status === 'completed' ? <Check size={12} /> : run.status === 'processing' ? <span className="mini-pulse" /> : null}{run.status}</span><ChevronDown className="run-chevron" size={14} /></button>)}</div> : <div className="empty-activity"><span className="empty-icon"><FolderClock size={20} /></span><strong>No analysis runs yet</strong><span>Upload your first applicant CSV to get started.</span></div>}<button className="text-action" onClick={() => document.getElementById('run-detail')?.scrollIntoView({ behavior: 'smooth' })}>View selected run <ArrowRight size={14} /></button></section>
         </div>
