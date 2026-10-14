@@ -106,10 +106,10 @@ The deployment script targets the `demo` stage in `ap-south-1`. It provisions a 
 
 ```powershell
 npm ci
-.\scripts\Deploy-Aws.ps1 -AwsProfile dpratik -Stage demo
+.\scripts\Deploy-Aws.ps1 -AwsProfile dpratik -Stage demo -LambdaArtifactPath .aws-build\loan-engine.zip
 ```
 
-The script packages only the Python 3.12 Lambda runtime dependencies as Linux wheels with `uv`, deploys the stack, applies database migrations, and uploads an application bundle with no CSV, screenshots, `.env`, or Git history. The ASGI server and relay HTTP client are installed only in the Docker image. If this machine cannot fetch Linux wheels, run the **Build Lambda package** workflow in GitHub Actions, then use `gh run download RUN_ID --name clickpe-lambda --dir .aws-build` and pass `-LambdaArtifactPath .aws-build\loan-engine.zip` to the deploy script.
+The script deploys the Linux Lambda package built by the **Build Lambda package** workflow, applies database migrations, and uploads an application bundle with no CSV, screenshots, `.env`, or Git history. The ASGI server and relay HTTP client are installed only in the Docker image. To rebuild the package, run the GitHub Actions workflow and use `gh run download RUN_ID --name clickpe-lambda --dir .aws-build`.
 
 Read the operator token from the ARN printed at deployment time, then start two PowerShell sessions. The first opens the console tunnel:
 
@@ -125,7 +125,7 @@ aws ssm start-session --profile dpratik --region ap-south-1 --target INSTANCE_ID
 
 Create the n8n owner account, then configure the internal Header Auth credential and a PostgreSQL credential pointing to the RDS endpoint using its generated password from Secrets Manager. Enable TLS for that RDS credential. Configure separate OpenRouter and Google API credentials if you want to run policy discovery. Attach credentials to workflow nodes, activate the three workflows, and open the web console at [http://localhost:3000](http://localhost:3000).
 
-The `demo` stack is billable while it exists. Retention limits customer-data exposure; it does not stop AWS resource charges. Before deleting the stack, remove its private `deployment/source.zip` artifact from the upload bucket so CloudFormation can delete the bucket. Do not delete the stack until you have saved anything needed for your submission.
+The `demo` stack is billable while it exists. Retention limits customer-data exposure; it does not stop AWS resource charges. Before deleting the stack, remove its private `deployment/source.zip` artifact from the upload bucket. Also empty the Serverless Framework deployment bucket if stack deletion reports it is non-empty. Do not delete the stack until you have saved anything needed for your submission.
 
 ## Demo recording outline
 

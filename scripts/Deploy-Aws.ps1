@@ -1,4 +1,4 @@
-param([string] $AwsProfile = 'dpratik', [string] $Stage = 'demo')
+param([string] $AwsProfile = 'dpratik', [string] $Stage = 'demo', [string] $LambdaArtifactPath = '')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $serverlessCli = Join-Path $projectRoot 'node_modules\.bin\serverless.cmd'
