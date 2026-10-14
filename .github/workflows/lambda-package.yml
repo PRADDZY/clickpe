@@ -8,13 +8,13 @@ permissions:
 
 jobs:
   package:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
       - name: Export locked runtime dependencies
@@ -39,7 +39,7 @@ jobs:
               assert "migrations/003_upload_processing_lease.sql" in names
               assert not any(name.lower().endswith((".csv", ".docx", ".png")) for name in names)
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: clickpe-lambda
           path: .aws-build/loan-engine.zip
