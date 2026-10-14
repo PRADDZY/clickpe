@@ -54,7 +54,8 @@ try {
         'app', 'migrations', 'n8n/workflows', 'web/src', 'scripts/New-Environment.ps1',
         'web/package.json', 'web/package-lock.json', 'web/index.html', 'web/vite.config.ts',
         'web/tsconfig.json', 'web/nginx.conf', 'web/Dockerfile',
-        'docker-compose.yml', 'Dockerfile', 'pyproject.toml'
+        'docker-compose.yml', 'Dockerfile', '.dockerignore', 'pyproject.toml',
+        'web/.dockerignore'
     )
     New-Item -ItemType Directory -Force -Path $sourceStage | Out-Null
     foreach ($path in $included) { Copy-ProjectPath $path }
