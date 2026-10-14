@@ -526,7 +526,7 @@ resources:
               EOF
               chmod 600 /opt/clickpe/.env
               cd /opt/clickpe
-              docker compose up -d --build
+              COMPOSE_PARALLEL_LIMIT=1 docker compose up -d --build
 
   Outputs:
     ApiBaseUrl:
