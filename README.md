@@ -7,7 +7,7 @@ An explainable loan-product screening prototype for the ClickPe engineering-inte
 - **FastAPI and PostgreSQL** for bounded CSV ingestion, applicant records, source snapshots, decisions, event delivery, policy approvals and audit history.
 - **React and TypeScript** operations console for importing a file, following a run, inspecting the rule explanation, reviewing policy changes and previewing notifications.
 - **Three n8n workflows** for daily official-page discovery, paged applicant matching, and a deduplicated notification preview. Matching is a fixed, versioned rules evaluator in a JavaScript Code node, not an LLM decision.
-- **AWS serverless infrastructure** for API Gateway, S3 direct uploads, SQS and a DLQ, Lambda ingestion, private RDS PostgreSQL, retention, and a small n8n host. PostgreSQL and n8n have no public inbound port.
+- **AWS infrastructure** for the API, S3 direct uploads, SQS and a DLQ, Lambda ingestion, private RDS PostgreSQL, retention, a private n8n host, and an HTTPS console served from the API Gateway origin. PostgreSQL and n8n have no public inbound port.
 - **Docker Compose** for a local stack with the same n8n workflows and API.
 - **GitHub Actions** for backend checks and a production TypeScript build.
 
@@ -102,30 +102,32 @@ These checks do not need the supplied CSV or the LLM API keys.
 
 ## AWS demo deployment
 
-The deployment script targets the `demo` stage in `ap-south-1`. It provisions a private PostgreSQL instance and Lambda networking, S3, SQS/DLQ, generated Secrets Manager values, API Gateway and an EC2 n8n host. The n8n host accepts no inbound connection; use Systems Manager to forward local ports. An authenticated AWS profile with the required CloudFormation, IAM, VPC, RDS, Lambda, API Gateway, S3, SQS, Secrets Manager and EC2 permissions is required.
+The deployment script targets the `demo` stage in `ap-south-1`. It provisions a private PostgreSQL instance and Lambda networking, S3, SQS/DLQ, generated Secrets Manager values, API Gateway and an EC2 n8n host. The n8n host accepts no inbound connection; use Systems Manager to forward its local port. An authenticated AWS profile with the required CloudFormation, IAM, VPC, RDS, Lambda, API Gateway, S3, SQS, Secrets Manager and EC2 permissions is required.
 
 ```powershell
 npm ci
-.\scripts\Deploy-Aws.ps1 -AwsProfile dpratik -Stage demo -LambdaArtifactPath .aws-build\loan-engine.zip
+.\scripts\Publish-Web.ps1 -AwsProfile dpratik -Stage demo
 ```
 
-The script deploys the Linux Lambda package built by the **Build Lambda package** workflow, applies database migrations, and uploads an application bundle with no CSV, screenshots, `.env`, or Git history. The ASGI server and relay HTTP client are installed only in the Docker image. To rebuild the package, run the GitHub Actions workflow and use `gh run download RUN_ID --name clickpe-lambda --dir .aws-build`.
+The script builds the console for the API's same-origin URL, packages it with the Linux Lambda application, applies database migrations, and uploads an application bundle with no CSV, screenshots, `.env`, or Git history. The ASGI server and relay HTTP client are installed only in the Docker image. To build a Lambda artifact in CI, run the **Build Lambda package** workflow; its archive includes the console assets.
 
-Read the operator token from the ARN printed at deployment time, then start two PowerShell sessions. The first opens the console tunnel:
+Build and deploy the public operator console:
 
 ```powershell
-aws ssm start-session --profile dpratik --region ap-south-1 --target INSTANCE_ID --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["3000"],"localPortNumber":["3000"]}'
+.\scripts\Publish-Web.ps1 -AwsProfile dpratik -Stage demo
 ```
 
-The second opens n8n:
+The command builds the React console into the Lambda package and serves the page and its static assets from the API Gateway HTTPS origin. The console URL is the API base URL printed by the command; opening it loads the workspace sign-in screen. The console and API share one origin, and S3 upload CORS is restricted to that API origin. The browser still requires the operator token; retrieve it from Secrets Manager using the ARN printed by the deployment script. Keep the token private.
+
+Open n8n through a Systems Manager port-forwarding session:
 
 ```powershell
 aws ssm start-session --profile dpratik --region ap-south-1 --target INSTANCE_ID --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["5678"],"localPortNumber":["5678"]}'
 ```
 
-Create the n8n owner account, then configure the internal Header Auth credential and a PostgreSQL credential pointing to the RDS endpoint using its generated password from Secrets Manager. Enable TLS for that RDS credential. Configure separate OpenRouter and Google API credentials if you want to run policy discovery. Attach credentials to workflow nodes, activate the three workflows, and open the web console at [http://localhost:3000](http://localhost:3000).
+Create the n8n owner account, then configure the internal Header Auth credential and a PostgreSQL credential pointing to the RDS endpoint using its generated password from Secrets Manager. Enable TLS for that RDS credential. Configure separate OpenRouter and Google API credentials if you want to run policy discovery. Attach credentials to workflow nodes and activate only the workflows you intend to demonstrate. Notifications remain preview-only.
 
-The `demo` stack is billable while it exists. Retention limits customer-data exposure; it does not stop AWS resource charges. Before deleting the stack, remove its private `deployment/source.zip` artifact from the upload bucket. Also empty the Serverless Framework deployment bucket if stack deletion reports it is non-empty. Do not delete the stack until you have saved anything needed for your submission.
+The `demo` stack is billable while it exists. Retention limits applicant-data exposure; it does not stop AWS resource charges. Before deleting the stack, remove its private `deployment/source.zip` artifact from the upload bucket. Also empty the Serverless Framework deployment bucket if stack deletion reports it is non-empty. Do not delete the stack until you have saved anything needed for your submission.
 
 ## Demo recording outline
 

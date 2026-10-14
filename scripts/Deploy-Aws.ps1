@@ -3,6 +3,8 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $serverlessCli = Join-Path $projectRoot 'node_modules\.bin\serverless.cmd'
 $sourceStage = Join-Path $env:TEMP ("clickpe-source-" + [guid]::NewGuid().ToString('N'))
+$previousWebOrigin = [Environment]::GetEnvironmentVariable('WEB_ORIGIN', 'Process')
+$previousFrontendApiUrl = [Environment]::GetEnvironmentVariable('VITE_API_BASE_URL', 'Process')
 . (Join-Path $PSScriptRoot 'Invoke-ClickPeServerless.ps1')
 
 function Copy-ProjectPath([string] $RelativePath) {
@@ -28,7 +30,28 @@ try {
     $identityText = & aws sts get-caller-identity --profile $AwsProfile --output json
     if ($LASTEXITCODE -ne 0) { throw 'The selected AWS profile is not authenticated.' }
     $identity = $identityText | ConvertFrom-Json
-    Write-Output ("Deploying the private demo stack to AWS account {0} in ap-south-1." -f $identity.Account)
+    Write-Output ("Deploying the demo stack to AWS account {0} in ap-south-1." -f $identity.Account)
+
+    if (-not $LambdaArtifactPath) {
+        if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { throw 'Install Node.js 22 or newer before building the console.' }
+        $env:VITE_API_BASE_URL = ''
+        Push-Location (Join-Path $projectRoot 'web')
+        try {
+            & npm.cmd ci
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install the locked console dependencies.' }
+            & npm.cmd run build
+            if ($LASTEXITCODE -ne 0) { throw 'Could not build the console.' }
+        }
+        finally { Pop-Location }
+    }
+
+    $stackName = "clickpe-loan-engine-$Stage"
+    $existingStackText = & aws cloudformation describe-stacks --stack-name $stackName --profile $AwsProfile --region ap-south-1 --output json 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $existingStack = ($existingStackText -join "`n") | ConvertFrom-Json
+        $existingApiOutput = $existingStack.Stacks[0].Outputs | Where-Object { $_.OutputKey -eq 'ApiBaseUrl' } | Select-Object -First 1
+        if ($existingApiOutput) { $env:WEB_ORIGIN = $existingApiOutput.OutputValue }
+    }
 
     & uv export --locked --no-dev --no-hashes --no-emit-project --format requirements.txt --output-file requirements.txt
     if ($LASTEXITCODE -ne 0) { throw 'Could not export the locked Python runtime dependencies.' }
@@ -39,16 +62,37 @@ try {
         & (Join-Path $PSScriptRoot 'New-LambdaPackage.ps1')
         if ($LASTEXITCODE -ne 0) { throw 'Could not build the Linux Lambda package.' }
     }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $lambdaZip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $projectRoot '.aws-build\loan-engine.zip'))
+    try {
+        if (-not ($lambdaZip.Entries | Where-Object { ($_.FullName -replace '\\', '/') -ceq 'web/dist/index.html' })) {
+            throw 'The Linux Lambda package is missing the built console. Run the updated Lambda package workflow.'
+        }
+        if ($lambdaZip.Entries | Where-Object { $_.FullName.Contains('\') }) {
+            throw 'The Lambda package contains non-portable ZIP paths. Rebuild it with the updated package workflow.'
+        }
+    }
+    finally { $lambdaZip.Dispose() }
+
     Invoke-ClickPeServerless -CliPath $serverlessCli -AwsProfile $AwsProfile -Arguments @('deploy', '--stage', $Stage)
-
-    Invoke-ClickPeServerless -CliPath $serverlessCli -AwsProfile $AwsProfile -Arguments @('invoke', '--stage', $Stage, '--function', 'migrate')
-
-    $stackName = "clickpe-loan-engine-$Stage"
     $stackJson = & aws cloudformation describe-stacks --stack-name $stackName --profile $AwsProfile --region ap-south-1 --output json
     if ($LASTEXITCODE -ne 0) { throw 'Could not read the completed stack outputs.' }
     $stack = $stackJson | ConvertFrom-Json
     $outputs = @{}
     foreach ($item in $stack.Stacks[0].Outputs) { $outputs[$item.OutputKey] = $item.OutputValue }
+    if ($env:WEB_ORIGIN -ne $outputs.ApiBaseUrl) {
+        $env:WEB_ORIGIN = $outputs.ApiBaseUrl
+        Write-Output ("Restricting web and upload access to the API origin {0}." -f $outputs.ApiBaseUrl)
+        Invoke-ClickPeServerless -CliPath $serverlessCli -AwsProfile $AwsProfile -Arguments @('deploy', '--stage', $Stage)
+        $stackJson = & aws cloudformation describe-stacks --stack-name $stackName --profile $AwsProfile --region ap-south-1 --output json
+        if ($LASTEXITCODE -ne 0) { throw 'Could not read the updated stack outputs.' }
+        $stack = $stackJson | ConvertFrom-Json
+        $outputs = @{}
+        foreach ($item in $stack.Stacks[0].Outputs) { $outputs[$item.OutputKey] = $item.OutputValue }
+    }
+
+    Invoke-ClickPeServerless -CliPath $serverlessCli -AwsProfile $AwsProfile -Arguments @('invoke', '--stage', $Stage, '--function', 'migrate')
 
     $included = @(
         'app', 'migrations', 'n8n/workflows', 'web/src', 'scripts/New-Environment.ps1',
@@ -118,16 +162,26 @@ try {
     finally { Remove-Item -LiteralPath $sourceZip -Force -ErrorAction SilentlyContinue }
 
     Write-Output ''
-    Write-Output 'The private demo stack is ready.'
-    Write-Output ("Console: {0}" -f $outputs.ApiBaseUrl)
+    Write-Output 'The AWS demo stack is ready.'
+    Write-Output ("Public console and API: {0}" -f $outputs.ApiBaseUrl)
     Write-Output ("EC2 instance: {0}" -f $outputs.N8nInstanceId)
     Write-Output ("Database host: {0}" -f $outputs.DatabaseHost)
     Write-Output ("Operator token secret ARN: {0}" -f $outputs.OperatorTokenSecretArn)
-    Write-Output 'The console and n8n are private on the instance. Use an AWS Systems Manager port-forwarding session as described in README.md.'
+    Write-Output 'The n8n host accepts no inbound connections; use an AWS Systems Manager port-forwarding session as described in README.md.'
     Write-Output 'In n8n, add the Postgres and authenticated HTTP credentials, then activate the three imported workflows.'
     Write-Output 'Notifications are in preview mode; no applicant emails are sent.'
 }
 finally {
     if (Test-Path -LiteralPath $sourceStage) { Remove-Item -LiteralPath $sourceStage -Recurse -Force }
+    if ($null -eq $previousWebOrigin) {
+        Remove-Item Env:\WEB_ORIGIN -ErrorAction SilentlyContinue
+    } else {
+        Set-Item Env:\WEB_ORIGIN $previousWebOrigin
+    }
+    if ($null -eq $previousFrontendApiUrl) {
+        Remove-Item Env:\VITE_API_BASE_URL -ErrorAction SilentlyContinue
+    } else {
+        Set-Item Env:\VITE_API_BASE_URL $previousFrontendApiUrl
+    }
     Pop-Location
 }
