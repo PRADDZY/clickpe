@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+from botocore.config import Config
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -249,7 +250,11 @@ def create_upload(
             "INSERT INTO upload (upload_id, object_key, filename, status) VALUES (%s,%s,%s,'awaiting_upload')",
             (upload_id, object_key, _safe_filename(filename)),
         )
-    client = boto3.client("s3", region_name=settings.aws_region)
+    client = boto3.client(
+        "s3",
+        region_name=settings.aws_region,
+        config=Config(s3={"addressing_style": "virtual"}),
+    )
     try:
         signed = client.generate_presigned_post(
             Bucket=settings.s3_upload_bucket,
