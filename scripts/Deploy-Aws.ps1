@@ -31,6 +31,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'The selected AWS profile is not authenticated.' }
     $identity = $identityText | ConvertFrom-Json
     Write-Output ("Deploying the demo stack to AWS account {0} in ap-south-1." -f $identity.Account)
+    $revision = & git rev-parse HEAD
+    if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the deployment revision.' }
+    $release = @{commit=$revision;built_at=[DateTimeOffset]::UtcNow.ToString('o')} | ConvertTo-Json
+    [IO.File]::WriteAllText((Join-Path $projectRoot 'app/release.json'), $release, [Text.UTF8Encoding]::new($false))
 
     if (-not $LambdaArtifactPath) {
         if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { throw 'Install Node.js 22 or newer before building the console.' }

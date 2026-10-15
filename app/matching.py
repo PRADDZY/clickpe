@@ -4,7 +4,10 @@ MAX_DECISIONS = 400
 
 # Named parameters are converted to n8n's $1/$2 by scripts/Sync-Workflows.py.
 PAGE_QUERY = """
-WITH policies AS MATERIALIZED (
+WITH started AS (
+  UPDATE run SET status='processing',started_at=COALESCE(started_at,now())
+  WHERE run_id=%(run_id)s AND status='queued' RETURNING run_id
+), policies AS MATERIALIZED (
   SELECT rp.product_id,s.snapshot_id::text,s.rules FROM run_policy rp
   JOIN policy_snapshot s ON s.snapshot_id=rp.snapshot_id WHERE rp.run_id=%(run_id)s
 ), bounds AS (

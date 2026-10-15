@@ -11,7 +11,7 @@ import pytest
 from psycopg.rows import dict_row
 
 from app import database, relay
-from app.api.notifications import prepare_notifications
+from app.api.notifications import DeliveryReceipt, prepare_notifications, record_receipt
 from app.api.routes import (
     NextBatchRequest,
     PersistBatchRequest,
@@ -165,6 +165,25 @@ def test_policy_proposal_binds_audit_strings(db):
         )
     )
     assert result["status"] == "pending_review"
+
+
+def test_test_delivery_uses_controlled_destination_and_claims_once(db, tmp_path, monkeypatch):
+    run = imported_run(tmp_path, 2)
+    save_match_batch(evaluate(next_match_batch(NextBatchRequest(run_id=run.run_id))))
+    monkeypatch.setattr(get_settings(), "notification_mode", "test")
+    monkeypatch.setattr(get_settings(), "test_recipients", "operator@controlled.invalid")
+    monkeypatch.setattr(get_settings(), "ses_sender", "sender@controlled.invalid")
+    prepared = prepare_notifications(run.run_id)
+    assert prepared["delivery_enabled"] is True
+    assert prepared["recipient"] == "operator@controlled.invalid"
+    assert "fixture@example.invalid" not in json.dumps(prepared)
+    assert "Axis Bank" in prepared["body"]
+    assert prepare_notifications(run.run_id)["delivery_enabled"] is False
+    receipt = DeliveryReceipt(
+        delivery_id=prepared["delivery_id"], message_id="synthetic-ses-receipt"
+    )
+    assert record_receipt(receipt)["status"] == "sent"
+    assert record_receipt(receipt)["status"] == "sent"
 
 
 def test_import_database_errors_remain_retryable(tmp_path, monkeypatch):

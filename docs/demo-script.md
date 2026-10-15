@@ -1,23 +1,27 @@
-# Demo recording: explain the boundaries, then show one run
+# Demo recording: 7-8 minute walkthrough
 
-Target length: 3-4 minutes. Record the browser and editor side by side. Use the synthetic assignment CSV. Do not show credentials, email addresses, cloud account secrets, or any real applicant record.
+Use the synthetic assignment CSV. Hide tokens, keys, passwords, account secrets, and applicant contact details. Record the browser and n8n editor. Rehearse with a completed run available, then upload a fresh file during the recording.
 
-## 1. Whiteboard first (45 seconds)
+## 0:00-1:00 - Architecture and event flow
 
-Draw four boxes: Upload/API, Postgres, n8n, lender sources. Show the AWS S3 -> SQS -> Lambda ingestion lane and the PostgreSQL transactional outbox -> relay -> n8n matching lane. Explain that n8n reads 200 profiles per page, the Code node applies fixed rules, and PostgreSQL stores explanations against a versioned policy snapshot. Explain how the outbox and unique cursors recover from retries.
+Show the README diagram. Explain S3 - SQS - Python Lambda - RDS for bulk import, followed by the transactional outbox - relay - n8n. Explain bounded pages, pinned policy versions, and the meaning of eligible, ineligible, and review. The lender makes the final decision.
 
-## 2. Show one completed run (60 seconds)
+## 1:00-2:15 - n8n discovery workflow
 
-Open the operations console, identify the active lender sources, upload `users.csv`, and point out that the names and email addresses stay masked. Show run status and counts. Open one eligible, one hard-rule failure and one review result. Explain that preferred criteria never become hard denials, unknown criteria produce review, and the lender makes the final decision.
+Show the schedule, the two official product sources, source-excerpt extraction, changed-source check, structured extraction and provider fallback, and the pending-review API. Show source-backed rate metadata when available. Explain how untrusted page content is treated and why operator approval is required. Demonstrate this only after provider credentials are configured and an execution succeeds; identify any remaining limitation honestly.
 
-## 3. Show the human review gate (45 seconds)
+## 2:15-4:00 - Upload and matching
 
-Open `Policy review`. Show the official source link, the extracted criterion summary, the version metadata and excerpt. Explain that daily source scraping plus structured extraction only proposes a snapshot; a human must approve it before future runs use it.
+Upload `users.csv`. Show visible import/matching progress. Open Workflow B and walk through the authenticated webhook, Postgres page query, JavaScript rule evaluation, and persistence callback. Explain that the page size adapts to product count and never exceeds 400 decisions. Show a completed run with 10,000 profiles and its total decisions.
 
-## 4. Show the notification boundary (30 seconds)
+## 4:00-5:15 - Explanations and policy versions
 
-Open the notification preview. Show the unique-address count and the `delivery_enabled: false` result. Explain that the project has no verified test alias, so it records previews and never sends to applicant addresses.
+Filter eligible, ineligible, and review decisions. Open the evidence dialog: observed value, required threshold, rule version, pinned snapshot, and official source. Browse the next page. Explain preferred versus required criteria and missing eligibility data. Show a pending proposal and explain why approval changes future runs.
 
-## 5. Close with a failure case (45 seconds)
+## 5:15-6:30 - SES test delivery
 
-Explain one concrete failure path: a malformed CSV gets a safe error code; an SQS item retries and moves to a DLQ after repeated failure; n8n writes each page idempotently; applicant rows expire after seven days. Finish with how you would validate the source policy and test-delivery address before enabling any real lender notification workflow.
+Show Workflow C's preview preparation, controlled-recipient gate, SES node, and receipt callback. Show the personalized email received in your controlled inbox and its matched product list, masking the address. Explain that all CSV addresses are replaced by the allowlisted test destination and that only one sample email is sent per run. Do not claim this section is complete while delivery is disabled.
+
+## 6:30-7:45 - Reliability and optimization
+
+Show one malformed CSV rejection and the passing CI checks. Explain retryable import errors, idempotent page callbacks, failure visibility, the retry button, and retained policy versions. Give the measured elapsed time, total applicant-product decisions, maximum batch size, and zero LLM calls per applicant-product pair. Finish with retention and the remaining documented limitations.
