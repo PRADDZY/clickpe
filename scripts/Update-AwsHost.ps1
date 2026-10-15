@@ -2,12 +2,25 @@ param(
     [string] $AwsProfile = 'dpratik',
     [Parameter(Mandatory=$true)][string] $InstanceId,
     [Parameter(Mandatory=$true)][string] $BucketName,
-    [Parameter(Mandatory=$true)][string] $BundleSha256
+    [Parameter(Mandatory=$true)][string] $BundleSha256,
+    [string] $SesRoleArn = '',
+    [string] $SesExternalIdSecretArn = '',
+    [ValidateSet('preview', 'test')][string] $NotificationMode = 'preview',
+    [string] $SesSender = '',
+    [string] $TestRecipients = ''
 )
 $ErrorActionPreference = 'Stop'
 if ($BucketName -notmatch '^[a-z0-9.-]+$' -or $BundleSha256 -notmatch '^[a-f0-9]{64}$') {
     throw 'Invalid bundle location or digest.'
 }
+$notificationConfig = @{
+    SES_ROLE_ARN=$SesRoleArn; SES_EXTERNAL_ID_SECRET_ARN=$SesExternalIdSecretArn
+    NOTIFICATION_MODE=$NotificationMode; SES_SENDER=$SesSender; TEST_RECIPIENTS=$TestRecipients
+}
+foreach ($value in $notificationConfig.Values) {
+    if ($value -match '[\r\n]') { throw 'Notification settings cannot contain newlines.' }
+}
+$encodedConfig = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($notificationConfig | ConvertTo-Json -Compress)))
 $commands = @(
     'set -eu',
     'cd /opt/clickpe',
@@ -15,6 +28,9 @@ $commands = @(
     "echo '$BundleSha256  /tmp/clickpe-next.zip' | sha256sum -c -",
     'tar -czf /opt/clickpe/previous-source.tar.gz app migrations n8n scripts docker-compose.yml Dockerfile pyproject.toml',
     'unzip -q -o /tmp/clickpe-next.zip -d /opt/clickpe',
+    "printf '%s' '$encodedConfig' | base64 -d > /opt/clickpe/.notification-config.json",
+    'chmod 600 /opt/clickpe/.notification-config.json',
+    'python3 /opt/clickpe/scripts/update_notification_env.py',
     'sh /opt/clickpe/scripts/update-host.sh'
 )
 $parameterFile = Join-Path $env:TEMP ('clickpe-ssm-' + [guid]::NewGuid().ToString('N') + '.json')

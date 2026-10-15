@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,9 +24,13 @@ class Settings(BaseSettings):
     s3_upload_bucket: str = ""
     aws_region: str = "ap-south-1"
     n8n_webhook_url: str = "http://localhost:5678/webhook/match-run"
-    notification_mode: str = "preview"
+    notification_mode: Literal["preview", "test"] = "preview"
     test_recipients: str = ""
     ses_sender: str = ""
+    notification_run_limit: int = Field(default=3, ge=1, le=200)
+    notification_daily_limit: int = Field(default=180, ge=1, le=200)
+    ses_role_arn: str = ""
+    ses_external_id_secret_arn: str = ""
 
     @property
     def test_recipient_list(self) -> set[str]:

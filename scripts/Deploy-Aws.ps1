@@ -163,7 +163,8 @@ try {
         & aws s3 cp $sourceZip ("s3://{0}/deployment/source.zip" -f $outputs.UploadBucketName) --profile $AwsProfile --region ap-south-1 --sse AES256
         if ($LASTEXITCODE -ne 0) { throw 'Could not upload the private EC2 application bundle.' }
         $bundleDigest = (Get-FileHash -LiteralPath $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant()
-        & (Join-Path $PSScriptRoot 'Update-AwsHost.ps1') -AwsProfile $AwsProfile -InstanceId $outputs.N8nInstanceId -BucketName $outputs.UploadBucketName -BundleSha256 $bundleDigest
+        $notificationMode = if ($env:NOTIFICATION_MODE) { $env:NOTIFICATION_MODE } else { 'preview' }
+        & (Join-Path $PSScriptRoot 'Update-AwsHost.ps1') -AwsProfile $AwsProfile -InstanceId $outputs.N8nInstanceId -BucketName $outputs.UploadBucketName -BundleSha256 $bundleDigest -SesRoleArn $outputs.SesRoleArn -SesExternalIdSecretArn $outputs.SesExternalIdSecretArn -NotificationMode $notificationMode -SesSender $env:SES_SENDER -TestRecipients $env:TEST_RECIPIENTS
     }
     finally { Remove-Item -LiteralPath $sourceZip -Force -ErrorAction SilentlyContinue }
 
@@ -175,7 +176,7 @@ try {
     Write-Output ("Operator token secret ARN: {0}" -f $outputs.OperatorTokenSecretArn)
     Write-Output 'The n8n host accepts no inbound connections; use an AWS Systems Manager port-forwarding session as described in README.md.'
     Write-Output 'Matching and notification workflows are published. Discovery is published when both model credentials are configured.'
-    Write-Output 'Notifications are in preview mode; no applicant emails are sent.'
+    Write-Output ("Notification mode: {0}. Delivery requires verified, configured controlled recipients." -f $notificationMode)
 }
 finally {
     if (Test-Path -LiteralPath $sourceStage) { Remove-Item -LiteralPath $sourceStage -Recurse -Force }

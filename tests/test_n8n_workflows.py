@@ -42,5 +42,12 @@ def test_notification_workflow_gates_ses_and_does_not_retry_sends():
     assert ses["parameters"]["toAddresses"] == ["={{ $json.recipient }}"]
     assert any(n["type"] == "n8n-nodes-base.if" for n in nodes)
     gate = workflow["connections"]["Controlled test delivery enabled?"]["main"]
-    assert gate[0][0]["node"] == ses["name"]
-    assert gate[1][0]["node"] == "Preview complete"
+    assert gate[0][0]["node"] == "Attach personalized message"
+    assert (
+        workflow["connections"]["Attach personalized message"]["main"][0][0]["node"] == ses["name"]
+    )
+    assert gate[1][0]["node"] == "Deliver applicants sequentially"
+    assert ses["parameters"]["authentication"] == "assumeRole"
+    assert any(n["type"] == "n8n-nodes-base.scheduleTrigger" for n in nodes)
+    assert any(n["name"] == "Reserve delivery before SES" for n in nodes)
+    assert next(n for n in nodes if n["name"] == "Record SES receipt")["retryOnFail"] is True
