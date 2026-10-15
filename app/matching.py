@@ -1,8 +1,8 @@
-"""Bounded page contract shared by the API and exported n8n Postgres node."""
+"""Bounded staged matching contract shared with n8n's Postgres node."""
 
 MAX_DECISIONS = 400
+ENGINE_VERSION = "rules-v2-staged"
 
-# Named parameters are converted to n8n's $1/$2 by scripts/Sync-Workflows.py.
 PAGE_QUERY = """
 WITH started AS (
   UPDATE run SET status='processing',started_at=COALESCE(started_at,now())
@@ -19,13 +19,26 @@ WITH started AS (
   ORDER BY user_id LIMIT (SELECT page_size+1 FROM bounds)
 ), numbered AS (
   SELECT *,ROW_NUMBER() OVER (ORDER BY user_id) AS seq FROM page
+), selected AS MATERIALIZED (
+  SELECT * FROM numbered WHERE seq<=(SELECT page_size FROM bounds)
+), pairs AS MATERIALIZED (
+  SELECT u.user_id,p.product_id,p.snapshot_id,p.rules,
+         policy_hard_screen(to_jsonb(u)-'seq',p.rules) AS screen
+  FROM selected u CROSS JOIN policies p
 )
 SELECT %(run_id)s::text AS run_id,%(cursor)s::text AS cursor_user_id,
   (SELECT product_count FROM bounds) AS product_count,
-  COALESCE(jsonb_agg(to_jsonb(n)-'seq' || jsonb_build_object('products',
-    (SELECT COALESCE(jsonb_agg(p ORDER BY product_id),'[]'::jsonb) FROM policies p)) ORDER BY user_id)
-    FILTER (WHERE seq<=(SELECT page_size FROM bounds)),'[]'::jsonb) AS users,
-  COUNT(*)>(SELECT page_size FROM bounds) AS has_more,
-  COALESCE(MAX(user_id) FILTER (WHERE seq<=(SELECT page_size FROM bounds)),%(cursor)s::text) AS last_user_id
-FROM numbered n
+  COALESCE((SELECT jsonb_agg(to_jsonb(u)-'seq' || jsonb_build_object('products',
+    (SELECT COALESCE(jsonb_agg(jsonb_build_object('product_id',p.product_id,
+      'snapshot_id',p.snapshot_id,'rules',p.rules,'mandatory_findings',p.screen->'findings') ORDER BY p.product_id),'[]'::jsonb)
+     FROM pairs p WHERE p.user_id=u.user_id AND NOT (p.screen->>'hard_failure')::boolean))
+    ORDER BY u.user_id) FROM selected u),'[]'::jsonb) AS users,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object('user_id',user_id,'product_id',product_id,
+    'snapshot_id',snapshot_id,'decision','ineligible','reasons',screen->'findings',
+    'rule_version','rules-v2-staged') ORDER BY user_id,product_id)
+    FROM pairs WHERE (screen->>'hard_failure')::boolean),'[]'::jsonb) AS preclassified_results,
+  (SELECT COUNT(*) FROM pairs WHERE (screen->>'hard_failure')::boolean) AS prefiltered_count,
+  (SELECT COUNT(*) FROM pairs WHERE NOT (screen->>'hard_failure')::boolean) AS candidate_count,
+  (SELECT COUNT(*) FROM numbered)>(SELECT page_size FROM bounds) AS has_more,
+  COALESCE((SELECT MAX(user_id) FROM selected),%(cursor)s::text) AS last_user_id
 """
