@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.notifications import router as notification_router
 from app.api.routes import router
+from app.api.workspace import router as workspace_router
 from app.config import get_settings
 
 settings = get_settings()
@@ -26,6 +27,7 @@ app.add_middleware(
 )
 app.include_router(router)
 app.include_router(notification_router)
+app.include_router(workspace_router)
 
 
 @app.middleware("http")
@@ -50,7 +52,7 @@ async def security_headers(request: Request, call_next):
         response.headers.setdefault(
             "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
         )
-    if request.url.path in {"/", "/index.html"}:
+    if request.url.path in {"/", "/index.html", "/overview", "/applicants", "/policies"}:
         response.headers["Cache-Control"] = "no-store"
     elif request.url.path.startswith("/assets/"):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
@@ -61,6 +63,9 @@ web_dist = Path(__file__).resolve().parent.parent / "web" / "dist"
 web_index = web_dist / "index.html"
 if web_index.is_file():
 
+    @app.get("/overview", include_in_schema=False)
+    @app.get("/applicants", include_in_schema=False)
+    @app.get("/policies", include_in_schema=False)
     @app.get("/", include_in_schema=False)
     def console_index() -> FileResponse:
         return FileResponse(web_index, media_type="text/html")
