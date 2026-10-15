@@ -31,7 +31,9 @@ async def security_headers(request: Request, call_next):
     response = await call_next(request)
     connect_sources = ["'self'"]
     if settings.s3_upload_bucket:
-        connect_sources.append(f"https://{settings.s3_upload_bucket}.s3.amazonaws.com")
+        connect_sources.append(
+            f"https://{settings.s3_upload_bucket}.s3.{settings.aws_region}.amazonaws.com"
+        )
     content_security_policy = (
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         f"font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src {' '.join(connect_sources)}; "
