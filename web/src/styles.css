@@ -1057,6 +1057,8 @@ footer {
 }
 .sr-only {
   position: absolute;
+  left: 0;
+  top: 0;
   clip: rect(0, 0, 0, 0);
   width: 1px;
   height: 1px;
@@ -1358,4 +1360,8 @@ footer {
   .notification-summary {
     font-size: 14px;
   }
+}
+
+.applicant-table[aria-busy="false"] {
+  min-height: 0;
 }

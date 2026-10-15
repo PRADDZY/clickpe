@@ -34,7 +34,8 @@ export function Provider({ children }: { children: ReactNode }) {
   const [pending, setPending] = useState<Policy[]>([]),
     [error, setError] = useState("");
   const [job, setJob] = useState<Job | null>(savedJob);
-  const transferring = useRef(false);
+  const operationLock = useRef(false);
+  const [operationBusy, setOperationBusy] = useState(false);
   const setToken = useCallback((v: string) => {
     setTokenState(v);
     if (v) sessionStorage.setItem("clickpe-operator-token", v);
@@ -219,7 +220,7 @@ export function Provider({ children }: { children: ReactNode }) {
       xhr.send(body);
     });
   const upload = async (file: File) => {
-    if (transferring.current || active) return;
+    if (operationLock.current || active) return;
     if (!file.name.toLowerCase().endsWith(".csv")) {
       setError("Choose a CSV file.");
       return;
@@ -234,7 +235,8 @@ export function Provider({ children }: { children: ReactNode }) {
       );
       return;
     }
-    transferring.current = true;
+    operationLock.current = true;
+    setOperationBusy(true);
     setError("");
     setJob({
       filename: file.name,
@@ -284,22 +286,34 @@ export function Provider({ children }: { children: ReactNode }) {
           old && { ...old, phase: "failed", error: (e as Error).message },
       );
     } finally {
-      transferring.current = false;
+      operationLock.current = false;
+      setOperationBusy(false);
     }
   };
   const retry = async (runId: string) => {
-    await request(`/api/runs/${runId}/retry`, { method: "POST" });
-    const run = await request<Run>(`/api/runs/${runId}/progress`);
-    setJob({
-      filename: run.filename,
-      started: Date.now(),
-      upload_id: run.upload_id,
-      run_id: runId,
-      phase: "match",
-      percent: 100,
-      run,
-    });
-    await refresh();
+    if (operationLock.current || active)
+      throw new Error(
+        "Wait for the current file to finish before retrying another analysis.",
+      );
+    operationLock.current = true;
+    setOperationBusy(true);
+    try {
+      await request(`/api/runs/${runId}/retry`, { method: "POST" });
+      const run = await request<Run>(`/api/runs/${runId}/progress`);
+      setJob({
+        filename: run.filename,
+        started: Date.now(),
+        upload_id: run.upload_id,
+        run_id: runId,
+        phase: "match",
+        percent: 100,
+        run,
+      });
+      await refresh();
+    } finally {
+      operationLock.current = false;
+      setOperationBusy(false);
+    }
   };
   const moreRuns = async () => {
     const r = await request<{ items: Run[]; total: number }>(
@@ -314,6 +328,7 @@ export function Provider({ children }: { children: ReactNode }) {
   return (
     <Context.Provider
       value={{
+        busy: operationBusy || active,
         loaded,
         token,
         setToken,

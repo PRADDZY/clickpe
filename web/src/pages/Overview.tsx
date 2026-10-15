@@ -12,7 +12,7 @@ import { useWorkspace } from "../workspace";
 import { Heading, Status } from "../components";
 import { fmt, date } from "../lib";
 function Progress() {
-  const { job, clearJob, retry } = useWorkspace(),
+  const { job, clearJob, retry, busy: workspaceBusy } = useWorkspace(),
     [now, setNow] = useState(Date.now()),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
@@ -133,7 +133,7 @@ function Progress() {
       {job.phase === "failed" && job.run_id && (
         <button
           className="button outline"
-          disabled={busy}
+          disabled={busy || workspaceBusy}
           onClick={async () => {
             setBusy(true);
             setError("");
@@ -158,10 +158,10 @@ function Progress() {
   );
 }
 export default function Overview() {
-  const { dashboard, runs, totalRuns, pending, job, upload } = useWorkspace(),
+  const { dashboard, runs, totalRuns, pending, job, upload, busy } =
+      useWorkspace(),
     file = useRef<HTMLInputElement>(null),
     [dragging, setDragging] = useState(false);
-  const busy = !!job && ["upload", "import", "match"].includes(job.phase);
   return (
     <>
       <Heading title="Overview">

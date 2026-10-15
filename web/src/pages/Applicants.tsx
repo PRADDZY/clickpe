@@ -44,6 +44,7 @@ function useRun(runId: string, revision = 0) {
 }
 export default function Applicants() {
   const {
+      busy: workspaceBusy,
       loaded,
       error: workspaceError,
       runs,
@@ -80,6 +81,7 @@ export default function Applicants() {
   const [preview, setPreview] = useState<{
       eligible_matches: number;
       distinct_email_addresses: number;
+      run_id: string;
     } | null>(null),
     [busy, setBusy] = useState(false);
   const update = (changes: Record<string, string>, reset = true) => {
@@ -260,7 +262,7 @@ export default function Applicants() {
                   "This analysis could not finish. Retry matching to resume."}
               </span>
               <button
-                disabled={busy}
+                disabled={busy || workspaceBusy}
                 onClick={async () => {
                   setBusy(true);
                   try {
@@ -428,7 +430,7 @@ export default function Applicants() {
                   Preview the eligible matches and distinct applicant email
                   addresses for this file.
                 </p>
-                {preview && (
+                {preview?.run_id === runId && (
                   <p role="status">
                     <strong>
                       {fmt(preview.eligible_matches)} eligible matches
@@ -444,12 +446,14 @@ export default function Applicants() {
                 onClick={async () => {
                   setBusy(true);
                   try {
-                    setPreview(
-                      await request(`/api/runs/${runId}/notification-preview`, {
-                        method: "POST",
-                        body: "{}",
-                      }),
-                    );
+                    const result = await request<{
+                      eligible_matches: number;
+                      distinct_email_addresses: number;
+                    }>(`/api/runs/${runId}/notification-preview`, {
+                      method: "POST",
+                      body: "{}",
+                    });
+                    setPreview({ ...result, run_id: runId });
                   } catch (e) {
                     setError((e as Error).message);
                   } finally {
@@ -461,7 +465,7 @@ export default function Applicants() {
               </button>
             </section>
           )}
-          <NotificationSummary runId={runId} />
+          <NotificationSummary key={runId} runId={runId} />
         </>
       )}
       {selected && (
@@ -476,7 +480,8 @@ export default function Applicants() {
 }
 function NotificationSummary({ runId }: { runId: string }) {
   const { request } = useWorkspace(),
-    [counts, setCounts] = useState<Record<string, number> | null>(null);
+    [counts, setCounts] = useState<Record<string, number> | null>(null),
+    [error, setError] = useState("");
   useEffect(() => {
     const c = new AbortController();
     const load = () =>
@@ -484,9 +489,17 @@ function NotificationSummary({ runId }: { runId: string }) {
         signal: c.signal,
       })
         .then((d) => {
-          if (!c.signal.aborted) setCounts(d);
+          if (!c.signal.aborted) {
+            setCounts(d);
+            setError("");
+          }
         })
-        .catch(() => {});
+        .catch(() => {
+          if (!c.signal.aborted) {
+            setCounts(null);
+            setError("Notification status unavailable. Reconnecting?");
+          }
+        });
     load();
     const t = setInterval(load, 6000);
     return () => {
@@ -494,6 +507,16 @@ function NotificationSummary({ runId }: { runId: string }) {
       clearInterval(t);
     };
   }, [request, runId]);
+  if (error)
+    return (
+      <section
+        className="notification-summary"
+        aria-label="Notification status"
+      >
+        <strong>Notifications</strong>
+        <span>{error}</span>
+      </section>
+    );
   return (
     counts && (
       <section
