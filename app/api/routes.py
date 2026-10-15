@@ -165,7 +165,9 @@ def _validate_rules(rules: dict[str, Any]) -> None:
 
 @router.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    release_path = Path(__file__).resolve().parents[1] / "release.json"
+    release = json.loads(release_path.read_text()) if release_path.exists() else {}
+    return {"status": "ok", "revision": release.get("commit", "development")}
 
 
 @router.get("/api/dashboard")

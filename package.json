@@ -10,5 +10,10 @@
   "devDependencies": {
     "serverless": "3.40.0",
     "serverless-iam-roles-per-function": "3.2.0"
+  },
+  "overrides": {
+    "tar": "7.5.22",
+    "adm-zip": "0.6.1",
+    "simple-git": "4.0.2"
   }
 }

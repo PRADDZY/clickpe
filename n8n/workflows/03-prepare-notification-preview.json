@@ -127,7 +127,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({delivery_id: $('Prepare preview and claim test delivery').item.json.delivery_id,message_id:$json.MessageId}) }}",
+        "jsonBody": "={{ JSON.stringify({delivery_id: $('Prepare preview and claim test delivery').item.json.delivery_id,message_id:($json.MessageId || $json.SendEmailResult?.MessageId || $json.SendEmailResponse?.SendEmailResult?.MessageId)}) }}",
         "options": {
           "timeout": 30000
         }

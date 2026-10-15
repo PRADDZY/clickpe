@@ -6,7 +6,7 @@ An explainable loan-product screening prototype for the ClickPe engineering-inte
 
 - **FastAPI and PostgreSQL** for bounded CSV ingestion, applicant records, source snapshots, decisions, event delivery, policy approvals and audit history.
 - **React and TypeScript** operations console for importing a file, following a run, inspecting the rule explanation, reviewing policy changes and previewing notifications.
-- **Three n8n workflows** for daily official-page discovery, paged applicant matching, and a deduplicated notification preview. Matching is a fixed, versioned rules evaluator in a JavaScript Code node, not an LLM decision.
+- **Three n8n workflows** for daily official-page discovery, paged applicant matching, and deduplicated notification previews with an optional controlled SES test delivery. Matching is a fixed, versioned rules evaluator in a JavaScript Code node, not an LLM decision.
 - **AWS infrastructure** for the API, S3 direct uploads, SQS and a DLQ, Lambda ingestion, private RDS PostgreSQL, retention, a private n8n host, and an HTTPS console served from the API Gateway origin. PostgreSQL and n8n have no public inbound port.
 - **Docker Compose** for a local stack with the same n8n workflows and API.
 - **GitHub Actions** for backend checks and a production TypeScript build.
@@ -24,13 +24,15 @@ flowchart LR
   DB --> OUT[Transactional outbox]
   OUT --> REL[Python relay on n8n host]
   REL --> MATCH[n8n matching workflow]
-  MATCH -->|Postgres: <=200 profiles| DB
+  MATCH -->|Postgres: <=200 profiles, <=400 decisions| DB
   MATCH -->|Code node: rules + reasons| API
   API --> DB
   DISC[n8n policy discovery] -->|official lender pages| SRC[OpenRouter; Google fallback]
   DISC -->|pending snapshot| DB
   OP[Operator source review] --> DB
-  PRE[n8n notification preview] --> DB
+  API -->|completed run outbox event| PRE[n8n notification workflow]
+  PRE -->|prepare preview and claim test delivery| API
+  PRE -->|only with configured test inbox| SES[AWS SES node]
 ```
 
 ### Decisions and safety boundaries
@@ -41,7 +43,9 @@ flowchart LR
 - Uploads are size-limited to 25 MiB, the CSV schema and row values are checked, the raw cloud object is deleted after import, and abandoned S3 objects expire after one day. Applicant rows and per-person results are deleted after seven days.
 - Workflow deliveries use a transactional outbox, deterministic page cursors and unique keys. A retried SQS delivery or n8n callback does not create duplicate results or pages.
 - Execution input and output data are not saved in n8n. Error messages and operational audit records omit applicant values.
-- Notifications are **preview-only**. The app writes idempotent preview records and reports unique email counts, but contains no mail-sending node. No controlled test-inbox alias was provided, so it cannot send to the CSV addresses.
+- Notifications default to **preview**. Workflow C includes an SES node behind a server-controlled gate: `NOTIFICATION_MODE=test`, one `TEST_RECIPIENTS` address, and `SES_SENDER` must be configured. The destination always comes from this allowlist, never from a CSV row. The current hosted demo has no test inbox configured, so delivery remains disabled.
+- Every run pins its approved product snapshots at import. New approvals affect future runs only. Pages hold at most 200 applicants and 400 applicant-product decisions; the persistence endpoint checks the complete expected page before advancing the cursor.
+- A test delivery claims at most one eligible applicant per run and lists all of that applicant's matched products. The SES node does not retry sends: an ambiguous send outcome requires checking SES and `test_delivery` before a manual resend, avoiding automatic duplicate messages.
 
 ## Lender source baseline
 
@@ -125,7 +129,11 @@ Open n8n through a Systems Manager port-forwarding session:
 aws ssm start-session --profile dpratik --region ap-south-1 --target INSTANCE_ID --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["5678"],"localPortNumber":["5678"]}'
 ```
 
-Create the n8n owner account, then configure the internal Header Auth credential and a PostgreSQL credential pointing to the RDS endpoint using its generated password from Secrets Manager. Enable TLS for that RDS credential. Configure separate OpenRouter and Google API credentials if you want to run policy discovery. Attach credentials to workflow nodes and activate only the workflows you intend to demonstrate. Notifications remain preview-only.
+The deployment updates the existing EC2 services through Systems Manager, imports stable workflow IDs, binds the internal API and RDS credentials, and publishes matching and notification workflows. It downloads the AWS RDS CA bundle and verifies database certificates for n8n. Existing external credential bindings are retained. Discovery is published when both provider credentials are configured; otherwise it stays unpublished with the curated baseline available for matching.
+
+Configure `OPENROUTER_API_KEY` and `GEMINI_API_KEY` privately in `/opt/clickpe/.env` (or bind the two provider Header Auth credentials in n8n), then rerun the host update. The owner account is still needed for accessing the n8n editor. The import updates the draft and publishing takes effect after n8n restarts.
+
+Before each host update, the previous source is retained in `/opt/clickpe/previous-source.tar.gz` and the previous workflow export in the n8n volume. On failure, stop the relay, inspect the SSM command, restore compatible source and workflow versions, and restart services. Database migrations are additive; do not drop the new tables during rollback.
 
 The `demo` stack is billable while it exists. Retention limits applicant-data exposure; it does not stop AWS resource charges. Before deleting the stack, remove its private `deployment/source.zip` artifact from the upload bucket. Also empty the Serverless Framework deployment bucket if stack deletion reports it is non-empty. Do not delete the stack until you have saved anything needed for your submission.
 
@@ -142,3 +150,23 @@ See [docs/demo-script.md](docs/demo-script.md) for a short screen-recording plan
 - `n8n/workflows/`: the three credential-free workflow exports.
 - `serverless.yml`: AWS stack, private networking and function-level permissions.
 - `web/src/`: responsive operator console.
+
+## Controlled SES demonstration
+
+A received email is required by the assignment. This remains a submission blocker until an inbox you control is available. An alias is optional; a normal inbox is sufficient.
+
+1. Verify the sender and, while SES is in the sandbox, the controlled recipient in `ap-south-1`. Complete verification from your inbox yourself.
+2. Configure an AWS credential on Workflow C's SES node with only the required SES sending permissions, scoped to the verified sender and destination. Enable that node if the deployed preview configuration disabled it.
+3. Set `NOTIFICATION_MODE=test`, `TEST_RECIPIENTS=<one controlled inbox>`, and `SES_SENDER=<verified sender>` in the host's private `.env`. Restart the API so it loads the settings. Keep credentials and addresses out of Git and the recording.
+4. Complete a new run. Workflow C prepares previews, selects one eligible applicant, substitutes the controlled destination, sends through SES, and records the SES MessageId. With no eligible applicant, it records the preview without sending.
+5. Show the received email and its matched product list in the recording. Restore `NOTIFICATION_MODE=preview` after the demonstration. Do not manually rerun an ambiguous delivery without inspecting its claim and SES receipt.
+
+## Validation and submission
+
+CI runs the actual n8n matcher JavaScript against disposable PostgreSQL fixtures. Coverage includes import SQL, three-product pagination, policy changes during a run, duplicate callbacks, incomplete-page rejection, notification handoff, policy audit inserts, and terminal relay failures. Set `TEST_DATABASE_URL` to a disposable PostgreSQL database to run the integration cases locally; the fixture creates and drops an isolated schema.
+
+The live submission should show one complete 10,000-row run. Record the run ID, pinned product count, expected and actual decisions, elapsed time (`completed_at - started_at`), peak batch size, and per-pair LLM request count (zero). Use observed numbers from that run; do not present synthetic integration fixtures as production throughput measurements.
+
+Before submission, record the 5-10 minute walkthrough in `docs/demo-script.md`, complete the received SES test email, and invite `ujjwalkala-clickpe`, `HarshSrivastav-Dailype`, `ManishBiswal-clickpe`, and `tushar-clickpe` to the private repository. The user chose to invite reviewers later; no invitations have been sent.
+
+Infrastructure tooling still uses Serverless Framework 3 for deployment compatibility. Its transitive dependencies have unresolved audit findings; they are absent from the Python Lambda and browser runtime packages. Compatible audit fixes were insufficient. Pinned overrides patch `tar`, `adm-zip`, and `simple-git`; the local npm audit still reports 18 affected packages, including one critical finding in the legacy archive dependency (checked 2026-10-15). A major toolchain migration requires separate package/deploy validation; do not use `npm audit fix --force` immediately before the submission.
