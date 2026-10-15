@@ -60,7 +60,7 @@ def runs(
 def progress(run_id: UUID) -> dict[str, Any]:
     row = _run(run_id)
     counts = one_row(
-        GROUPED + "SELECT COALESCE(SUM(processed_decisions),0) AS processed_decisions,"
+        GROUPED + "SELECT COALESCE(SUM(processed_decisions),0)::bigint AS processed_decisions,"
         "COUNT(*) FILTER (WHERE status!='processing') AS processed_applicants,"
         "COUNT(*) FILTER (WHERE status='matched') AS matched,"
         "COUNT(*) FILTER (WHERE status='review') AS review,"
