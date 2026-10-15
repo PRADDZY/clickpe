@@ -148,7 +148,7 @@ def import_upload(upload_id: str, object_key: str, filename: str, path: Path) ->
                 (run_id, run_id),
             )
             cur.execute(
-                "INSERT INTO audit_event (actor,action,entity_type,entity_id,details) VALUES ('operator','upload_imported','run',%s,jsonb_build_object('rows',%s,'sha256',%s))",
+                "INSERT INTO audit_event (actor,action,entity_type,entity_id,details) VALUES ('operator','upload_imported','run',%s,jsonb_build_object('rows',%s::integer,'sha256',%s::text))",
                 (run_id, row_count, digest),
             )
         return ImportedRun(run_id, row_count, row_count, duplicate_emails)
