@@ -5,6 +5,10 @@ $serverlessCli = Join-Path $projectRoot 'node_modules\.bin\serverless.cmd'
 $sourceStage = Join-Path $env:TEMP ("clickpe-source-" + [guid]::NewGuid().ToString('N'))
 $previousWebOrigin = [Environment]::GetEnvironmentVariable('WEB_ORIGIN', 'Process')
 $previousFrontendApiUrl = [Environment]::GetEnvironmentVariable('VITE_API_BASE_URL', 'Process')
+$previousNotificationEnv = @{}
+foreach ($key in @('NOTIFICATION_MODE','SES_SENDER','TEST_RECIPIENTS')) {
+    $previousNotificationEnv[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+}
 . (Join-Path $PSScriptRoot 'Invoke-ClickPeServerless.ps1')
 
 function Copy-ProjectPath([string] $RelativePath) {
@@ -31,6 +35,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'The selected AWS profile is not authenticated.' }
     $identity = $identityText | ConvertFrom-Json
     Write-Output ("Deploying the demo stack to AWS account {0} in ap-south-1." -f $identity.Account)
+    $notificationJson = & uv run python -c "import json; from app.config import get_settings; s=get_settings(); print(json.dumps({'mode':s.notification_mode,'sender':s.ses_sender.strip().lower(),'recipients':','.join(sorted(s.test_recipient_list))}))"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not resolve notification settings from the private environment.' }
+    $notificationSettings = ($notificationJson -join "`n") | ConvertFrom-Json
+    $env:NOTIFICATION_MODE = $notificationSettings.mode
+    # The same normalized settings configure IAM, Lambda and the host. Defaults
+    # reference a non-existent identity and recipient, granting no usable send.
+    $env:SES_SENDER = if ($notificationSettings.sender) { $notificationSettings.sender } else { 'unconfigured@example.invalid' }
+    $env:TEST_RECIPIENTS = if ($notificationSettings.recipients) { $notificationSettings.recipients } else { 'unconfigured@example.invalid' }
     $revision = & git rev-parse HEAD
     if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the deployment revision.' }
     $release = @{commit=$revision;built_at=[DateTimeOffset]::UtcNow.ToString('o')} | ConvertTo-Json
@@ -163,8 +175,8 @@ try {
         & aws s3 cp $sourceZip ("s3://{0}/deployment/source.zip" -f $outputs.UploadBucketName) --profile $AwsProfile --region ap-south-1 --sse AES256
         if ($LASTEXITCODE -ne 0) { throw 'Could not upload the private EC2 application bundle.' }
         $bundleDigest = (Get-FileHash -LiteralPath $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant()
-        $notificationMode = if ($env:NOTIFICATION_MODE) { $env:NOTIFICATION_MODE } else { 'preview' }
-        & (Join-Path $PSScriptRoot 'Update-AwsHost.ps1') -AwsProfile $AwsProfile -InstanceId $outputs.N8nInstanceId -BucketName $outputs.UploadBucketName -BundleSha256 $bundleDigest -SesRoleArn $outputs.SesRoleArn -SesExternalIdSecretArn $outputs.SesExternalIdSecretArn -NotificationMode $notificationMode -SesSender $env:SES_SENDER -TestRecipients $env:TEST_RECIPIENTS
+        $notificationMode = $notificationSettings.mode
+        & (Join-Path $PSScriptRoot 'Update-AwsHost.ps1') -AwsProfile $AwsProfile -InstanceId $outputs.N8nInstanceId -BucketName $outputs.UploadBucketName -BundleSha256 $bundleDigest -SesRoleArn $outputs.SesRoleArn -SesExternalIdSecretArn $outputs.SesExternalIdSecretArn -NotificationMode $notificationMode -SesSender $notificationSettings.sender -TestRecipients $notificationSettings.recipients
     }
     finally { Remove-Item -LiteralPath $sourceZip -Force -ErrorAction SilentlyContinue }
 
@@ -179,6 +191,10 @@ try {
     Write-Output ("Notification mode: {0}. Delivery requires verified, configured controlled recipients." -f $notificationMode)
 }
 finally {
+    foreach ($key in $previousNotificationEnv.Keys) {
+        if ($null -eq $previousNotificationEnv[$key]) { Remove-Item "Env:\$key" -ErrorAction SilentlyContinue }
+        else { Set-Item "Env:\$key" $previousNotificationEnv[$key] }
+    }
     if (Test-Path -LiteralPath $sourceStage) { Remove-Item -LiteralPath $sourceStage -Recurse -Force }
     if ($null -eq $previousWebOrigin) {
         Remove-Item Env:\WEB_ORIGIN -ErrorAction SilentlyContinue
