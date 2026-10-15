@@ -37,11 +37,11 @@ BEGIN
   END IF;
   rule := rules->'credit_score';
   IF rule->>'kind'='required' THEN
-    passed := (profile->>'credit_score')::int >= (rule->>'min')::int;
+    passed := (profile->>'credit_score')::int >= (rule->>'min')::numeric;
     findings := findings || jsonb_build_array(jsonb_build_object('criterion','credit_score','status',CASE WHEN passed THEN 'pass' ELSE 'fail' END,'minimum',rule->'min','observed_value',profile->'credit_score'));
     hard_failure := hard_failure OR NOT passed;
   ELSIF rule->>'kind'='preferred' THEN
-    passed := (profile->>'credit_score')::int >= (rule->>'min')::int;
+    passed := (profile->>'credit_score')::int >= (rule->>'min')::numeric;
     findings := findings || jsonb_build_array(jsonb_build_object('criterion','credit_score','status',CASE WHEN passed THEN 'pass' ELSE 'review' END,'preferred_minimum',rule->'min','observed_value',profile->'credit_score','message','The source describes this as preferred, not a hard cutoff.'));
   ELSE
     findings := findings || '[{"criterion":"credit_score","status":"unknown","message":"The official source does not establish a score cutoff."}]'::jsonb;
