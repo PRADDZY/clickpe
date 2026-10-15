@@ -6,29 +6,32 @@ import {
   Search, ShieldCheck, UploadCloud, X,
 } from 'lucide-react'
 import './upload-feedback.css'
+import './run-details.css'
 
 const API = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? 'http://localhost:8000' : '')
 type Decision = 'eligible' | 'ineligible' | 'review'
 type Run = {
   run_id: string; status: string; row_count: number; duplicate_email_count: number
   matched_count: number; unmatched_count: number; review_count: number; created_at: string
+  product_count?: number; processed_decisions?: number
   error_code?: string | null
 }
 type UploadStatus = { status: string; run_id: string | null; error_code: string | null }
 type UploadFeedback = { tone: 'info' | 'success' | 'error'; message: string }
 type Product = {
   product_id: string; lender: string; product_name: string; product_url: string
-  observed_at: string | null; extraction_status: string | null
+  observed_at: string | null; extraction_status: string | null; advertised_rate?: string | null
 }
 type PendingPolicy = {
   snapshot_id: string; product_id: string; lender: string; product_name: string
   source_url: string; observed_at: string; rules: Record<string, { kind: string; status?: string; min?: number; max?: number; currency?: string; location_dependent?: boolean }>
   source_excerpt: string; model_provider: string; model_name: string; reviewer_note: string
 }
-type Dashboard = { runs: Run[]; total_runs: number; total_rows: number; pending_events: number; products: Product[]; storage_mode: 's3' | 'local'; max_upload_bytes: number }
+type Dashboard = { runs: Run[]; total_runs: number; total_rows: number; pending_events: number; failed_events: number; relay_online: boolean; products: Product[]; storage_mode: 's3' | 'local'; max_upload_bytes: number }
 type Match = {
   result_id: string; user_id: string; product_id: string; lender: string; product_name: string
-  decision: Decision; reasons: { criterion: string; status: string; minimum?: number; maximum?: number; message?: string }[]
+  snapshot_id: string; source_url: string; observed_at: string; rule_version: string
+  decision: Decision; reasons: { criterion: string; status: string; minimum?: number; maximum?: number; message?: string; observed_value?: string | number; required_value?: string; preferred_minimum?: number; currency?: string }[]
 }
 
 const fmt = (value: number) => new Intl.NumberFormat('en-IN').format(value || 0)
@@ -63,6 +66,11 @@ export default function App() {
   const [selectedRun, setSelectedRun] = useState<Run | null>(null)
   const [results, setResults] = useState<Match[]>([])
   const [totalResults, setTotalResults] = useState(0)
+  const [page, setPage] = useState(0)
+  const [selectedMatch, setSelectedMatch] = useState<Match | null>(null)
+  const [retrying, setRetrying] = useState(false)
+  const [resultsLoading, setResultsLoading] = useState(false)
+  const detailDialog = useRef<HTMLDialogElement>(null)
   const [filter, setFilter] = useState<'all' | Decision>('all')
   const [authError, setAuthError] = useState('')
   const [error, setError] = useState('')
@@ -94,22 +102,33 @@ export default function App() {
       const data = await request('/api/dashboard') as Dashboard
       const policies = await request('/api/policies/pending') as PendingPolicy[]
       setDashboard(data); setPendingPolicies(policies); setError('')
-      const preferredRun = preferredRunId ? data.runs.find((run) => run.run_id === preferredRunId) : null
-      if (preferredRun) setSelectedRun(preferredRun)
-      else if (!selectedRun && data.runs.length) setSelectedRun(data.runs[0])
-      else if (selectedRun) setSelectedRun(data.runs.find((r) => r.run_id === selectedRun.run_id) || selectedRun)
+      setSelectedRun((current) => data.runs.find((r) => r.run_id === (preferredRunId || current?.run_id)) || current || data.runs[0] || null)
     } catch (e) { if ((e as Error).message !== 'Session expired') setError((e as Error).message) }
   }
 
   useEffect(() => { if (token) void refresh() }, [token])
   useEffect(() => { if (!token) return; const timer = window.setInterval(() => { void refresh() }, 6000); return () => clearInterval(timer) }, [token, selectedRun?.run_id])
+  useEffect(() => { setPage(0); setPreview(null); setSelectedMatch(null) }, [selectedRun?.run_id, filter])
   useEffect(() => {
     if (!token || !selectedRun) return
+    const controller = new AbortController()
+    setResultsLoading(true)
     const decision = filter === 'all' ? '' : `&decision=${filter}`
-    request(`/api/runs/${selectedRun.run_id}/results?limit=40&offset=0${decision}`)
-      .then((data) => { setResults(data.results); setTotalResults(data.total) })
-      .catch((e) => setError((e as Error).message))
-  }, [token, selectedRun?.run_id, filter, selectedRun?.status, selectedRun?.matched_count, selectedRun?.unmatched_count, selectedRun?.review_count])
+    request(`/api/runs/${selectedRun.run_id}/results?limit=40&offset=${page * 40}${decision}`, { signal: controller.signal })
+      .then((data) => { if (!controller.signal.aborted) { setResults(data.results); setTotalResults(data.total) } })
+      .catch((e) => { if (!controller.signal.aborted) setError((e as Error).message) })
+      .finally(() => { if (!controller.signal.aborted) setResultsLoading(false) })
+    return () => controller.abort()
+  }, [token, selectedRun?.run_id, filter, page, selectedRun?.status, selectedRun?.matched_count, selectedRun?.unmatched_count, selectedRun?.review_count])
+  useEffect(() => { if (selectedMatch) detailDialog.current?.showModal(); else detailDialog.current?.close() }, [selectedMatch])
+
+  const retryRun = async () => {
+    if (!selectedRun) return
+    setRetrying(true)
+    try { await request(`/api/runs/${selectedRun.run_id}/retry`, { method: 'POST' }); await refresh() }
+    catch (e) { setError((e as Error).message) }
+    finally { setRetrying(false) }
+  }
 
   const metrics = useMemo(() => {
     const run = selectedRun
@@ -227,7 +246,7 @@ export default function App() {
     </aside>
 
     <main className="main-area">
-      <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span className="crumb-slash">/</span><strong>Overview</strong></div><div className="topbar-right"><div className="system-status"><span className="pulse" /> Engine ready</div><button className="icon-button" title="Refresh dashboard" onClick={() => void refresh()}><RotateCw size={16} /></button><div className="top-avatar">O</div></div></header>
+      <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span className="crumb-slash">/</span><strong>Overview</strong></div><div className="topbar-right"><div className="system-status"><span className={dashboard?.relay_online ? "pulse" : ""} /> {error ? 'Connection needs attention' : !dashboard?.relay_online ? 'Worker offline' : dashboard.failed_events ? 'Runs need attention' : dashboard.pending_events ? 'Processing queue' : 'Worker online'}</div><button className="icon-button" title="Refresh dashboard" onClick={() => void refresh()}><RotateCw size={16} /></button><div className="top-avatar">O</div></div></header>
       <div className="content">
         <div className="page-heading"><div><div className="date-eyebrow">YOUR LENDING WORKSPACE</div><h1>Good to see you, Operator <span className="wave">✳</span></h1><p>Review your latest portfolio run and what comes next.</p></div><button className="button ghost refresh-wide" onClick={() => void refresh()}><RotateCw size={15} /> Refresh</button></div>
 
@@ -244,9 +263,10 @@ export default function App() {
         {preview && <section className="alert preview-info" role="status"><div><strong>Preview ready</strong><span>{fmt(preview.eligible_matches)} eligible matches across {fmt(preview.distinct_email_addresses)} unique email addresses. Delivery is disabled; no emails were sent.</span></div><button className="alert-dismiss" onClick={() => setPreview(null)}><X size={16} /></button></section>}
 
         <section className="panel results-panel" id="run-detail"><div className="results-heading"><div><div className="section-kicker">DECISION REVIEW</div><h2>{selectedRun ? 'Applicant results' : 'Results will appear here'}</h2><p>{selectedRun ? `Run ${selectedRun.run_id.slice(0, 8)} · ${fmt(selectedRun.row_count)} applicant profiles` : 'Select a completed analysis run to explore the matches.'}</p></div><div className="result-actions"><div className="filter-control"><Search size={14} /><select value={filter} onChange={(e) => setFilter(e.target.value as typeof filter)} aria-label="Filter results"><option value="all">All decisions</option><option value="eligible">Eligible</option><option value="review">Needs review</option><option value="ineligible">Do not qualify</option></select><ChevronDown size={14} /></div><button className="button outline" onClick={() => void makePreview()} disabled={!selectedRun || selectedRun.status !== 'completed'}><CirclePlay size={15} /> Notification preview</button></div></div>
-          {selectedRun?.status === 'processing' || selectedRun?.status === 'queued' ? <div className="processing-banner"><span className="loading-spinner" /><span><strong>Your results are on the way</strong><small>The workflow checks applicant profiles in small batches. This view refreshes automatically.</small></span><span className="processing-status">{selectedRun.status}</span></div> : null}
-          {selectedRun?.status === 'failed' && <div className="processing-banner error-banner"><span><strong>This run needs attention</strong><small>Open the workflow in n8n and check its execution status. Applicant details are not included in error logs.</small></span></div>}
-          {results.length ? <><div className="results-table-wrap"><table><thead><tr><th>APPLICANT ID</th><th>LENDER PRODUCT</th><th>DECISION</th><th>WHY THIS RESULT</th><th></th></tr></thead><tbody>{results.map((result) => <tr key={result.result_id}><td><span className="user-id">{result.user_id}</span></td><td><div className="product-cell"><div className="bank-icon"><Banknote size={15} /></div><span><strong>{result.lender}</strong><small>{result.product_name}</small></span></div></td><td><span className={`decision ${result.decision}`}>{result.decision === 'eligible' ? <BadgeCheck size={13} /> : result.decision === 'review' ? <CircleHelp size={13} /> : <ShieldCheck size={13} />}{result.decision === 'ineligible' ? 'Does not qualify' : result.decision === 'review' ? 'Needs review' : 'Eligible'}</span></td><td><span className="reason-text">{result.reasons.find((reason) => reason.status === 'fail')?.criterion?.replace('_', ' ') || result.reasons.find((reason) => reason.status === 'unknown' || reason.status === 'review')?.message || 'All confirmed criteria are met'}</span></td><td><button className="row-more" title="Decision details" onClick={() => window.alert(result.reasons.map((reason) => `${reason.criterion}: ${reason.status}${reason.message ? ` — ${reason.message}` : ''}`).join('\n'))}><MoreHorizontal size={17} /></button></td></tr>)}</tbody></table></div><div className="table-footer"><span>Showing {Math.min(results.length, totalResults)} of {fmt(totalResults)} results</span><span>Applicant identities stay masked</span></div></> : selectedRun?.status === 'completed' ? <div className="empty-results"><div className="empty-icon"><FileChartColumn size={19} /></div><strong>No decisions to show yet</strong><span>Check whether there are approved lender policies available for this run.</span></div> : null}
+          {selectedRun?.status === 'processing' || selectedRun?.status === 'queued' ? <div className="processing-banner"><span className="loading-spinner" /><span><strong>Your results are on the way</strong><small>{fmt(selectedRun.processed_decisions || 0)} of {fmt(selectedRun.row_count * (selectedRun.product_count || 0))} decisions saved. This view refreshes automatically.</small></span><span className="processing-status">{selectedRun.status}</span></div> : null}
+          {selectedRun?.status === 'failed' && <div className="processing-banner error-banner"><span><strong>This run needs attention</strong><small>{uploadErrorMessages[selectedRun.error_code || ''] || 'The workflow could not finish. Retry to resume from the last saved batch.'}</small></span><button className="button outline" disabled={retrying} onClick={() => void retryRun()}>{retrying ? 'Retrying?' : 'Retry run'}</button></div>}
+          {resultsLoading && <p role="status" className="results-loading">Loading results?</p>}
+          {results.length ? <><div className="results-table-wrap"><table><thead><tr><th>APPLICANT ID</th><th>LENDER PRODUCT</th><th>DECISION</th><th>WHY THIS RESULT</th><th></th></tr></thead><tbody>{results.map((result) => <tr key={result.result_id}><td><span className="user-id">{result.user_id}</span></td><td><div className="product-cell"><div className="bank-icon"><Banknote size={15} /></div><span><strong>{result.lender}</strong><small>{result.product_name}</small></span></div></td><td><span className={`decision ${result.decision}`}>{result.decision === 'eligible' ? <BadgeCheck size={13} /> : result.decision === 'review' ? <CircleHelp size={13} /> : <ShieldCheck size={13} />}{result.decision === 'ineligible' ? 'Does not qualify' : result.decision === 'review' ? 'Needs review' : 'Eligible'}</span></td><td><span className="reason-text">{result.reasons.find((reason) => reason.status === 'fail')?.criterion?.replace('_', ' ') || result.reasons.find((reason) => reason.status === 'unknown' || reason.status === 'review')?.message || 'All confirmed criteria are met'}</span></td><td><button className="row-more" title="Decision details" onClick={() => setSelectedMatch(result)}><MoreHorizontal size={17} /></button></td></tr>)}</tbody></table></div><div className="table-footer"><span>Showing {fmt(page * 40 + 1)}?{fmt(page * 40 + results.length)} of {fmt(totalResults)} results</span><div className="pagination"><button className="button outline" disabled={page === 0 || resultsLoading} onClick={() => setPage((p) => p - 1)}>Previous</button><button className="button outline" disabled={(page + 1) * 40 >= totalResults || resultsLoading} onClick={() => setPage((p) => p + 1)}>Next</button></div></div></> : selectedRun?.status === 'completed' ? <div className="empty-results"><div className="empty-icon"><FileChartColumn size={19} /></div><strong>No results for this filter</strong><span>Choose another decision filter to explore this run.</span></div> : null}
         </section>
 
         <section id="policy-review" className="policy-review-section"><div className="lender-heading"><div><div className="section-kicker">HUMAN REVIEW</div><h2>Policy changes to review</h2><p>AI extracts source terms for review. It never changes a live rule by itself.</p></div><span className="review-count">{pendingPolicies.length} awaiting</span></div>{pendingPolicies.length ? <div className="pending-policy-grid">{pendingPolicies.map((policy) => <article className="pending-policy" key={policy.snapshot_id}><div className="pending-policy-top"><div className="lender-logo">{policy.lender === 'Axis Bank' ? 'A' : 'B'}</div><div><strong>{policy.lender} · {policy.product_name}</strong><span>Extracted {relative(policy.observed_at)} · {policy.model_provider} / {policy.model_name}</span></div></div><div className="criteria-chips">{Object.entries(policy.rules).filter(([key]) => key !== 'version' && key !== 'incomplete_eligibility').map(([key, rule]) => <span key={key}><b>{key.replace('_', ' ')}</b> {rule.kind === 'unknown' ? 'not found' : rule.kind === 'required' || rule.kind === 'preferred' ? `${rule.min ?? rule.status ?? ''}${rule.max ? `–${rule.max}` : ''}${rule.currency ? ` ${rule.currency}` : ''}${rule.kind === 'preferred' ? ' preferred' : ''}${rule.location_dependent ? ' · location based' : ''}` : rule.status}</span>)}</div><details className="source-evidence"><summary>Review source excerpt and criteria</summary><p>{policy.reviewer_note}</p><pre>{policy.source_excerpt}</pre><a href={policy.source_url} target="_blank" rel="noreferrer">Open official source <ArrowRight size={12} /></a></details><div className="pending-policy-actions"><span><ShieldCheck size={13} />Manual approval changes future runs</span><button className="button primary" onClick={() => void approvePolicy(policy)}><Check size={14} /> Approve criteria</button></div></article>)}</div> : <div className="empty-policy"><span className="source-count-dot" /><span>All active lender criteria have an approved source.</span></div>}</section>
@@ -255,6 +275,12 @@ export default function App() {
 
         <footer className="page-footer"><span>ClickPe eligibility workspace</span><span>Screening aid only · lender decisions remain independent</span><a href="mailto:hello@clickpe.ai">Need a hand? <CircleHelp size={13} /></a></footer>
       </div>
+    <dialog ref={detailDialog} className="decision-dialog" onClose={() => setSelectedMatch(null)} aria-labelledby="decision-title">
+      {selectedMatch && <><div className="dialog-heading"><div><div className="section-kicker">DECISION EVIDENCE</div><h2 id="decision-title">{selectedMatch.product_name}</h2><p>Applicant {selectedMatch.user_id} ? {selectedMatch.decision}</p></div><button autoFocus className="icon-button" aria-label="Close decision details" onClick={() => setSelectedMatch(null)}><X size={20} /></button></div>
+      <dl className="snapshot-details"><div><dt>Policy snapshot</dt><dd>{selectedMatch.snapshot_id}</dd></div><div><dt>Rule version</dt><dd>{selectedMatch.rule_version}</dd></div><div><dt>Source observed</dt><dd>{new Date(selectedMatch.observed_at).toLocaleString('en-IN')}</dd></div></dl>
+      <a href={selectedMatch.source_url} target="_blank" rel="noreferrer">View official policy source ?</a>
+      <div className="evidence-list">{selectedMatch.reasons.map((reason, index) => <article key={index}><strong>{reason.criterion.replaceAll('_', ' ')} <span className={`decision ${reason.status === 'fail' ? 'ineligible' : reason.status === 'pass' ? 'eligible' : 'review'}`}>{reason.status}</span></strong><p>{reason.observed_value !== undefined ? `Observed: ${reason.observed_value}. ` : ''}{reason.required_value ? `Required: ${reason.required_value}. ` : ''}{reason.minimum !== undefined ? `Minimum: ${reason.minimum}${reason.currency ? ` ${reason.currency}` : ''}. ` : ''}{reason.maximum !== undefined ? `Maximum: ${reason.maximum}. ` : ''}{reason.preferred_minimum !== undefined ? `Preferred minimum: ${reason.preferred_minimum}. ` : ''}{reason.message}</p></article>)}</div></>}
+    </dialog>
     </main>
   </div>
 }

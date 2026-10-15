@@ -95,11 +95,11 @@ try {
     Invoke-ClickPeServerless -CliPath $serverlessCli -AwsProfile $AwsProfile -Arguments @('invoke', '--stage', $Stage, '--function', 'migrate')
 
     $included = @(
-        'app', 'migrations', 'n8n/workflows', 'web/src', 'scripts/New-Environment.ps1',
+        'app', 'migrations', 'n8n/workflows', 'web/src', 'scripts',
         'web/package.json', 'web/package-lock.json', 'web/index.html', 'web/vite.config.ts',
         'web/tsconfig.json', 'web/nginx.conf', 'web/Dockerfile',
         'docker-compose.yml', 'Dockerfile', '.dockerignore', 'pyproject.toml',
-        'web/.dockerignore'
+        'web/.dockerignore', 'uv.lock'
     )
     New-Item -ItemType Directory -Force -Path $sourceStage | Out-Null
     foreach ($path in $included) { Copy-ProjectPath $path }
@@ -158,6 +158,8 @@ try {
     try {
         & aws s3 cp $sourceZip ("s3://{0}/deployment/source.zip" -f $outputs.UploadBucketName) --profile $AwsProfile --region ap-south-1 --sse AES256
         if ($LASTEXITCODE -ne 0) { throw 'Could not upload the private EC2 application bundle.' }
+        $bundleDigest = (Get-FileHash -LiteralPath $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant()
+        & (Join-Path $PSScriptRoot 'Update-AwsHost.ps1') -AwsProfile $AwsProfile -InstanceId $outputs.N8nInstanceId -BucketName $outputs.UploadBucketName -BundleSha256 $bundleDigest
     }
     finally { Remove-Item -LiteralPath $sourceZip -Force -ErrorAction SilentlyContinue }
 
@@ -168,7 +170,7 @@ try {
     Write-Output ("Database host: {0}" -f $outputs.DatabaseHost)
     Write-Output ("Operator token secret ARN: {0}" -f $outputs.OperatorTokenSecretArn)
     Write-Output 'The n8n host accepts no inbound connections; use an AWS Systems Manager port-forwarding session as described in README.md.'
-    Write-Output 'In n8n, add the Postgres and authenticated HTTP credentials, then activate the three imported workflows.'
+    Write-Output 'Matching and notification workflows are published. Discovery is published when both model credentials are configured.'
     Write-Output 'Notifications are in preview mode; no applicant emails are sent.'
 }
 finally {
