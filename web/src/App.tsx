@@ -1,287 +1,1878 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowRight, BadgeCheck, Banknote, Check, ChevronDown,
-  CircleHelp, CirclePlay, FileChartColumn, FileText, Fingerprint,
-  FolderClock, LockKeyhole, LogOut, MoreHorizontal, RotateCw,
-  Search, ShieldCheck, UploadCloud, X,
-} from 'lucide-react'
-import './upload-feedback.css'
-import './run-details.css'
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  BrowserRouter,
+  Link,
+  NavLink,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useSearchParams,
+} from "react-router";
+import {
+  ArrowRight,
+  Banknote,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  FileText,
+  LayoutDashboard,
+  LoaderCircle,
+  LogOut,
+  RefreshCw,
+  ShieldCheck,
+  UploadCloud,
+  Users,
+  X,
+} from "lucide-react";
 
-const API = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? 'http://localhost:8000' : '')
-type Decision = 'eligible' | 'ineligible' | 'review'
-type Run = {
-  run_id: string; status: string; row_count: number; duplicate_email_count: number
-  matched_count: number; unmatched_count: number; review_count: number; created_at: string
-  product_count?: number; processed_decisions?: number
-  error_code?: string | null
-}
-type UploadStatus = { status: string; run_id: string | null; error_code: string | null }
-type UploadFeedback = { tone: 'info' | 'success' | 'error'; message: string }
+const API =
+  import.meta.env.VITE_API_BASE_URL ??
+  (import.meta.env.DEV ? "http://localhost:8000" : "");
+const fmt = (n: number) => new Intl.NumberFormat("en-IN").format(n || 0);
+const date = (v: string) =>
+  new Date(v).toLocaleString("en-IN", {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+const labels: Record<string, string> = {
+  matched: "Matched",
+  review: "Needs review",
+  unmatched: "No match",
+  processing: "Processing",
+  queued: "Queued",
+  completed: "Completed",
+  failed: "Failed",
+  eligible: "Eligible",
+  ineligible: "Not eligible",
+};
+const errors: Record<string, string> = {
+  empty_csv: "The CSV has no applicant rows.",
+  invalid_csv: "Check the CSV formatting and upload it again.",
+  invalid_csv_schema:
+    "Use the required columns shown below, then upload the corrected CSV.",
+  invalid_encoding: "Save the CSV as UTF-8 and upload it again.",
+  invalid_row:
+    "Check for missing or invalid applicant values, then upload the corrected CSV.",
+  too_many_rows: "Use a CSV with at most 100,000 applicants.",
+  matching_failed:
+    "Matching could not finish. Retry to continue from the last saved batch.",
+  workflow_unavailable:
+    "Matching is unavailable. Retry when the service is restored.",
+  import_failed: "Import could not finish. Check the CSV and upload it again.",
+  file_too_large: "The CSV exceeds the upload limit.",
+};
 type Product = {
-  product_id: string; lender: string; product_name: string; product_url: string
-  observed_at: string | null; extraction_status: string | null; advertised_rate?: string | null
-}
-type PendingPolicy = {
-  snapshot_id: string; product_id: string; lender: string; product_name: string
-  source_url: string; observed_at: string; rules: Record<string, { kind: string; status?: string; min?: number; max?: number; currency?: string; location_dependent?: boolean }>
-  advertised_rate?: string | null; rate_source_quote?: string | null
-  source_excerpt: string; model_provider: string; model_name: string; reviewer_note: string
-}
-type Dashboard = { runs: Run[]; total_runs: number; total_rows: number; pending_events: number; failed_events: number; relay_online: boolean; products: Product[]; storage_mode: 's3' | 'local'; max_upload_bytes: number }
-type Match = {
-  result_id: string; user_id: string; product_id: string; lender: string; product_name: string
-  snapshot_id: string; source_url: string; observed_at: string; rule_version: string
-  decision: Decision; reasons: { criterion: string; status: string; minimum?: number; maximum?: number; message?: string; observed_value?: string | number; required_value?: string; preferred_minimum?: number; currency?: string }[]
-}
-
-const fmt = (value: number) => new Intl.NumberFormat('en-IN').format(value || 0)
-const uploadErrorMessages: Record<string, string> = {
-  empty_csv: 'The CSV has no applicant rows.',
-  file_too_large: 'The CSV exceeds the 25 MiB upload limit.',
-  import_failed: 'The CSV reached storage, but the database could not import it.',
-  ingest_retryable: 'The importer hit a temporary error and is retrying.',
-  invalid_csv: 'The CSV could not be parsed. Check its formatting and try again.',
-  invalid_csv_schema: 'Use these columns: user_id, name, email, monthly_income, credit_score, employment_status, age.',
-  invalid_encoding: 'Save the CSV as UTF-8, then try again.',
-  invalid_row: 'At least one row has a missing or invalid value. Check the CSV and try again.',
-  matching_failed: 'The CSV imported, but eligibility matching failed. Check the run details.',
-  too_many_rows: 'The CSV exceeds the 100,000 row limit.',
-  upload_not_found: 'The importer could not find this upload. Please try again.',
-  workflow_unavailable: 'The CSV imported, but the matching workflow is unavailable.',
-}
-const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds))
-const relative = (value: string) => {
-  const seconds = Math.round((Date.now() - new Date(value).getTime()) / 1000)
-  if (seconds < 60) return 'Just now'
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
-  return new Date(value).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
-}
-
-export default function App() {
-  const [token, setToken] = useState(() => sessionStorage.getItem('clickpe-operator-token') || '')
-  const [draftToken, setDraftToken] = useState('')
-  const [dashboard, setDashboard] = useState<Dashboard | null>(null)
-  const [pendingPolicies, setPendingPolicies] = useState<PendingPolicy[]>([])
-  const [selectedRun, setSelectedRun] = useState<Run | null>(null)
-  const [results, setResults] = useState<Match[]>([])
-  const [totalResults, setTotalResults] = useState(0)
-  const [page, setPage] = useState(0)
-  const [selectedMatch, setSelectedMatch] = useState<Match | null>(null)
-  const [retrying, setRetrying] = useState(false)
-  const [resultsLoading, setResultsLoading] = useState(false)
-  const detailDialog = useRef<HTMLDialogElement>(null)
-  const [filter, setFilter] = useState<'all' | Decision>('all')
-  const [authError, setAuthError] = useState('')
-  const [error, setError] = useState('')
-  const [uploadFeedback, setUploadFeedback] = useState<UploadFeedback | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [dragging, setDragging] = useState(false)
-  const [preview, setPreview] = useState<{ eligible_matches: number; distinct_email_addresses: number } | null>(null)
-  const fileInput = useRef<HTMLInputElement>(null)
-
-  const request = async (path: string, init: RequestInit = {}) => {
-    const response = await fetch(`${API}${path}`, {
-      ...init,
-      headers: { 'X-Operator-Token': token, ...(init.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...init.headers },
-    })
-    if (response.status === 401) {
-      sessionStorage.removeItem('clickpe-operator-token'); setToken(''); setAuthError('Your session ended. Enter the operator token again.')
-      throw new Error('Session expired')
-    }
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}))
-      throw new Error(body.detail || `Request failed (${response.status})`)
-    }
-    return response.json()
+  product_id: string;
+  lender: string;
+  product_name: string;
+  product_url: string;
+  advertised_rate?: string;
+  observed_at?: string;
+  extraction_status?: string;
+};
+type Run = {
+  run_id: string;
+  upload_id?: string;
+  filename: string;
+  status: string;
+  row_count: number;
+  created_at: string;
+  error_code?: string;
+  product_count?: number;
+  processed_decisions?: number;
+  processed_applicants?: number;
+  applicant_summary?: Record<string, number>;
+  products?: Product[];
+};
+type Dashboard = {
+  total_rows: number;
+  total_runs: number;
+  products: Product[];
+  storage_mode: string;
+  max_upload_bytes: number;
+};
+type Rule = {
+  kind: string;
+  min?: number;
+  max?: number;
+  status?: string;
+  currency?: string;
+  location_dependent?: boolean;
+};
+type Policy = {
+  snapshot_id: string;
+  lender: string;
+  product_name: string;
+  source_url: string;
+  source_excerpt: string;
+  observed_at: string;
+  advertised_rate?: string;
+  rate_source_quote?: string;
+  reviewer_note?: string;
+  rules: Record<string, Rule>;
+};
+type Applicant = {
+  user_id: string;
+  status: string;
+  processed_decisions: number;
+  matched_products: Product[];
+};
+type Reason = {
+  criterion: string;
+  status: string;
+  message?: string;
+  observed_value?: string | number;
+  required_value?: string;
+  minimum?: number;
+  maximum?: number;
+  preferred_minimum?: number;
+  currency?: string;
+};
+type Result = {
+  result_id: string;
+  lender: string;
+  product_name: string;
+  decision: string;
+  reasons: Reason[];
+  source_url: string;
+  snapshot_id: string;
+  rule_version: string;
+  observed_at: string;
+  advertised_rate?: string;
+};
+type Job = {
+  filename: string;
+  started: number;
+  upload_id?: string;
+  run_id?: string;
+  phase: "upload" | "import" | "match" | "ready" | "failed";
+  percent: number;
+  confirming?: boolean;
+  error?: string;
+  run?: Run;
+  reconnecting?: boolean;
+};
+type Request = <T = unknown>(path: string, init?: RequestInit) => Promise<T>;
+type Workspace = {
+  token: string;
+  setToken: (v: string) => void;
+  authError: string;
+  dashboard: Dashboard | null;
+  runs: Run[];
+  totalRuns: number;
+  pending: Policy[];
+  error: string;
+  request: Request;
+  refresh: () => Promise<void>;
+  job: Job | null;
+  upload: (file: File) => Promise<void>;
+  clearJob: () => void;
+  retry: (runId: string) => Promise<void>;
+  moreRuns: () => Promise<void>;
+};
+const Context = createContext<Workspace>(null!);
+const useWorkspace = () => useContext(Context);
+const storageKey = "clickpe-active-upload";
+function savedJob(): Job | null {
+  try {
+    const j = JSON.parse(
+      sessionStorage.getItem(storageKey) || "null",
+    ) as Job | null;
+    return j?.upload_id && j.phase !== "upload" ? j : null;
+  } catch {
+    return null;
   }
-
-  const refresh = async (preferredRunId?: string) => {
-    if (!token) return
-    try {
-      const data = await request('/api/dashboard') as Dashboard
-      const policies = await request('/api/policies/pending') as PendingPolicy[]
-      setDashboard(data); setPendingPolicies(policies); setError('')
-      setSelectedRun((current) => data.runs.find((r) => r.run_id === (preferredRunId || current?.run_id)) || current || data.runs[0] || null)
-    } catch (e) { if ((e as Error).message !== 'Session expired') setError((e as Error).message) }
-  }
-
-  useEffect(() => { if (token) void refresh() }, [token])
-  useEffect(() => { if (!token) return; const timer = window.setInterval(() => { void refresh() }, 6000); return () => clearInterval(timer) }, [token, selectedRun?.run_id])
-  useEffect(() => { setPage(0); setPreview(null); setSelectedMatch(null) }, [selectedRun?.run_id, filter])
-  useEffect(() => {
-    if (!token || !selectedRun) return
-    const controller = new AbortController()
-    setResultsLoading(true)
-    const decision = filter === 'all' ? '' : `&decision=${filter}`
-    request(`/api/runs/${selectedRun.run_id}/results?limit=40&offset=${page * 40}${decision}`, { signal: controller.signal })
-      .then((data) => { if (!controller.signal.aborted) { setResults(data.results); setTotalResults(data.total) } })
-      .catch((e) => { if (!controller.signal.aborted) setError((e as Error).message) })
-      .finally(() => { if (!controller.signal.aborted) setResultsLoading(false) })
-    return () => controller.abort()
-  }, [token, selectedRun?.run_id, filter, page, selectedRun?.status, selectedRun?.matched_count, selectedRun?.unmatched_count, selectedRun?.review_count])
-  useEffect(() => { if (selectedMatch) detailDialog.current?.showModal(); else detailDialog.current?.close() }, [selectedMatch])
-
-  const retryRun = async () => {
-    if (!selectedRun) return
-    setRetrying(true)
-    try { await request(`/api/runs/${selectedRun.run_id}/retry`, { method: 'POST' }); await refresh() }
-    catch (e) { setError((e as Error).message) }
-    finally { setRetrying(false) }
-  }
-
-  const metrics = useMemo(() => {
-    const run = selectedRun
-    return [
-      { label: 'Profiles received', value: fmt(run?.row_count || 0), caption: run ? `${fmt(run.duplicate_email_count)} repeated email addresses` : 'Select a run to see results', icon: FileText, tone: 'blue' },
-      { label: 'Eligible matches', value: fmt(run?.matched_count || 0), caption: 'Meet every confirmed rule', icon: BadgeCheck, tone: 'green' },
-      { label: 'Do not meet known rules', value: fmt(run?.unmatched_count || 0), caption: 'Failed at least one hard requirement', icon: ShieldCheck, tone: 'red' },
-      { label: 'Manual review', value: fmt(run?.review_count || 0), caption: 'A term needs clarification', icon: CircleHelp, tone: 'amber' },
-    ]
-  }, [selectedRun])
-
-  const signIn = async (event: React.FormEvent) => {
-    event.preventDefault(); setAuthError('')
-    const candidate = draftToken.trim()
-    try {
-      const response = await fetch(`${API}/api/dashboard`, { headers: { 'X-Operator-Token': candidate } })
-      if (!response.ok) throw new Error(response.status === 401 ? 'That token was not accepted.' : 'The API is not reachable yet.')
-      sessionStorage.setItem('clickpe-operator-token', candidate); setToken(candidate); setDashboard(await response.json())
-    } catch (e) { setAuthError((e as Error).message) }
-  }
-
-  const upload = async (file?: File) => {
-    if (!file) return
-    if (!file.name.toLowerCase().endsWith('.csv')) { setUploadFeedback({ tone: 'error', message: 'Choose a .csv file.' }); return }
-    if (dashboard && file.size > dashboard.max_upload_bytes) { setUploadFeedback({ tone: 'error', message: 'That CSV exceeds the 25 MiB upload limit.' }); return }
-    setLoading(true); setError(''); setPreview(null)
-    setUploadFeedback({ tone: 'info', message: `Preparing ${file.name}…` })
-    let uploadStage: 'api' | 'storage' | 'processing' = 'api'
-    try {
-      let data: { upload_id: string }
-      if (dashboard?.storage_mode === 's3') {
-        const signed = await request(`/api/uploads?filename=${encodeURIComponent(file.name)}`, { method: 'POST' })
-        const form = new FormData()
-        Object.entries(signed.upload.fields as Record<string, string>).forEach(([key, value]) => form.append(key, value))
-        form.append('file', file)
-        uploadStage = 'storage'
-        setUploadFeedback({ tone: 'info', message: 'Sending the CSV to secure storage…' })
-        const uploaded = await fetch(signed.upload.url as string, { method: 'POST', body: form })
-        if (!uploaded.ok) throw new Error(`Storage rejected the CSV upload (HTTP ${uploaded.status}). Try again or share that status.`)
-        data = { upload_id: signed.upload_id as string }
-      } else {
-        const body = new FormData(); body.append('file', file)
-        data = await request('/api/uploads/local', { method: 'POST', body })
+}
+function Provider({ children }: { children: ReactNode }) {
+  const [token, setTokenState] = useState(
+    () => sessionStorage.getItem("clickpe-operator-token") || "",
+  );
+  const [authError, setAuthError] = useState("");
+  const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [runs, setRuns] = useState<Run[]>([]),
+    [totalRuns, setTotalRuns] = useState(0);
+  const [pending, setPending] = useState<Policy[]>([]),
+    [error, setError] = useState("");
+  const [job, setJob] = useState<Job | null>(savedJob);
+  const transferring = useRef(false);
+  const setToken = useCallback((v: string) => {
+    setTokenState(v);
+    if (v) sessionStorage.setItem("clickpe-operator-token", v);
+    else sessionStorage.removeItem("clickpe-operator-token");
+  }, []);
+  const expire = useCallback(() => {
+    setToken("");
+    setAuthError(
+      "Your session expired. Sign in again to continue monitoring this file.",
+    );
+  }, [setToken]);
+  const request: Request = useCallback(
+    async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
+      const response = await fetch(`${API}${path}`, {
+        ...init,
+        headers: {
+          "X-Operator-Token": token,
+          ...(!(init.body instanceof FormData)
+            ? { "Content-Type": "application/json" }
+            : {}),
+          ...init.headers,
+        },
+      });
+      if (response.status === 401) {
+        expire();
+        throw new Error("Session expired");
       }
-      uploadStage = 'processing'
-      setUploadFeedback({ tone: 'info', message: `Upload received · ${data.upload_id.slice(0, 8)} · waiting for import…` })
-      const deadline = Date.now() + 60_000
-      while (Date.now() < deadline) {
-        const status = await request(`/api/uploads/${data.upload_id}`) as UploadStatus
-        if (status.status === 'failed') {
-          const detail = status.error_code ? uploadErrorMessages[status.error_code] || `Import failed (${status.error_code}).` : 'Import failed. Please try again.'
-          throw new Error(detail)
-        }
-        if (status.run_id) {
-          const run = await request(`/api/runs/${status.run_id}`) as Run
-          await refresh(status.run_id)
-          if (status.status === 'completed' || run.status === 'completed') {
-            setUploadFeedback({ tone: 'success', message: `Analysis complete · ${fmt(run.row_count)} applicant profiles processed.` })
-          } else if (run.status === 'failed') {
-            const detail = run.error_code ? uploadErrorMessages[run.error_code] || `Matching failed (${run.error_code}).` : 'Matching failed. Check the run details.'
-            setUploadFeedback({ tone: 'error', message: detail })
-          } else {
-            setUploadFeedback({ tone: 'success', message: `CSV imported · ${fmt(run.row_count)} profiles · matching is ${run.status}.` })
-          }
-          return
-        }
-        setUploadFeedback({ tone: 'info', message: status.status === 'processing' ? 'CSV received · importing applicant rows…' : 'CSV received · waiting for the importer…' })
-        await wait(1500)
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.detail || `Request failed (${response.status})`);
       }
-      setUploadFeedback({ tone: 'error', message: `Storage received the file, but import is not confirmed yet. Reference ${data.upload_id.slice(0, 8)}; refresh the workspace shortly.` })
+      return response.json() as Promise<T>;
+    },
+    [token, expire],
+  );
+  const refresh = useCallback(async () => {
+    try {
+      const [d, r, p] = await Promise.all([
+        request<Dashboard>("/api/dashboard"),
+        request<{ items: Run[]; total: number }>("/api/runs?limit=20"),
+        request<Policy[]>("/api/policies/pending"),
+      ]);
+      setDashboard(d);
+      setRuns((current) => [
+        ...r.items,
+        ...current.filter(
+          (old) => !r.items.some((item) => item.run_id === old.run_id),
+        ),
+      ]);
+      setTotalRuns(r.total);
+      setPending(p);
+      setError("");
     } catch (e) {
-      const message = (e as Error).message
-      const networkMessage = uploadStage === 'api'
-        ? 'The browser could not reach the upload API. Check the failed Network request and try again.'
-        : uploadStage === 'storage'
-          ? 'The browser could not reach storage. Check the failed Network request and try again.'
-          : 'The file may be in storage, but the workspace could not check its import status. Refresh and retry if needed.'
-      setUploadFeedback({ tone: 'error', message: message === 'Failed to fetch' ? networkMessage : message })
+      if ((e as Error).message !== "Session expired")
+        setError(
+          "Unable to refresh the workspace. Check your connection and try again.",
+        );
     }
-    finally { setLoading(false); if (fileInput.current) fileInput.current.value = '' }
-  }
-
-  const makePreview = async () => {
-    if (!selectedRun) return
-    try { setPreview(await request(`/api/runs/${selectedRun.run_id}/notification-preview`, { method: 'POST', body: '{}' })) }
-    catch (e) { setError((e as Error).message) }
-  }
-
-  const approvePolicy = async (policy: PendingPolicy) => {
+  }, [request]);
+  useEffect(() => {
+    if (!token) return;
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 6000);
+    return () => clearInterval(timer);
+  }, [token, refresh]);
+  useEffect(() => {
+    if (job?.upload_id) sessionStorage.setItem(storageKey, JSON.stringify(job));
+    else sessionStorage.removeItem(storageKey);
+  }, [job]);
+  const active = job?.phase === "import" || job?.phase === "match";
+  useEffect(() => {
+    if (!token || !active || !job?.upload_id) return;
+    let stopped = false,
+      timer = 0,
+      failures = 0;
+    const controller = new AbortController(),
+      uploadId = job.upload_id;
+    const poll = async () => {
+      try {
+        const upload = await request<{
+          status: string;
+          run_id: string | null;
+          error_code: string | null;
+        }>(`/api/uploads/${uploadId}`, { signal: controller.signal });
+        const run = upload.run_id
+          ? await request<Run>(`/api/runs/${upload.run_id}/progress`, {
+              signal: controller.signal,
+            })
+          : undefined;
+        if (stopped) return;
+        failures = 0;
+        const failed = upload.status === "failed" || run?.status === "failed";
+        const code = run?.error_code || upload.error_code || "";
+        setJob(
+          (old) =>
+            old && {
+              ...old,
+              run_id: upload.run_id || undefined,
+              run,
+              reconnecting: false,
+              phase: failed
+                ? "failed"
+                : run?.status === "completed"
+                  ? "ready"
+                  : run
+                    ? "match"
+                    : "import",
+              error: failed
+                ? errors[code] ||
+                  "Processing could not finish. Review this run or upload a corrected file."
+                : undefined,
+            },
+        );
+        if (failed || run?.status === "completed") {
+          void refresh();
+          return;
+        }
+      } catch (e) {
+        if (stopped || (e as Error).message === "Session expired") return;
+        failures++;
+        setJob((old) => old && { ...old, reconnecting: true });
+      }
+      if (!stopped)
+        timer = window.setTimeout(poll, Math.min(1500 * 2 ** failures, 15000));
+    };
+    void poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [token, active, job?.upload_id, request, refresh]);
+  const sendFile = (url: string, body: FormData, authenticated: boolean) =>
+    new Promise<{ upload_id?: string }>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      if (authenticated) xhr.setRequestHeader("X-Operator-Token", token);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable)
+          setJob(
+            (old) =>
+              old && {
+                ...old,
+                percent: Math.min(
+                  100,
+                  Math.round((event.loaded / event.total) * 100),
+                ),
+                confirming: event.loaded === event.total,
+              },
+          );
+      };
+      xhr.upload.onload = () =>
+        setJob((old) => old && { ...old, percent: 100, confirming: true });
+      xhr.onload = () => {
+        if (xhr.status === 401) {
+          expire();
+          reject(new Error("Session expired"));
+          return;
+        }
+        let response: { detail?: string; upload_id?: string } = {};
+        try {
+          response = JSON.parse(xhr.responseText || "{}");
+        } catch {
+          /* S3 can respond without JSON. */
+        }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(response);
+        else
+          reject(
+            new Error(
+              response.detail ||
+                `Upload was rejected (${xhr.status}). Check the file and try again.`,
+            ),
+          );
+      };
+      xhr.onerror = () =>
+        reject(
+          new Error(
+            "The connection ended before upload was confirmed. Check recent files before trying again.",
+          ),
+        );
+      xhr.send(body);
+    });
+  const upload = async (file: File) => {
+    if (transferring.current || active) return;
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      setError("Choose a CSV file.");
+      return;
+    }
+    if (!dashboard) {
+      setError("Wait for the workspace to load before uploading.");
+      return;
+    }
+    if (!file.size || file.size > dashboard.max_upload_bytes) {
+      setError(
+        `Choose a nonempty CSV under ${Math.round(dashboard.max_upload_bytes / 1024 / 1024)} MiB.`,
+      );
+      return;
+    }
+    transferring.current = true;
+    setError("");
+    setJob({
+      filename: file.name,
+      started: Date.now(),
+      phase: "upload",
+      percent: 0,
+    });
     try {
-      await request(`/api/policies/${policy.snapshot_id}/approve`, { method: 'POST', body: '{}' })
-      setError(`${policy.lender} policy approved · new analyses will use this version`)
-      await refresh()
-    } catch (e) { setError((e as Error).message) }
-  }
-
-  if (!token) return <main className="login-shell"><div className="login-card">
-    <div className="brand-mark"><Banknote size={20} strokeWidth={2.3} /></div>
-    <span className="eyebrow">CLICKPE · OPERATIONS</span>
-    <h1>Your loan eligibility workspace</h1>
-    <p>Sign in with the operator token configured for this demo. Applicant information is protected behind the API.</p>
-    <form onSubmit={signIn} className="login-form"><label htmlFor="operator-token">Operator token</label><input autoComplete="current-password" id="operator-token" type="password" value={draftToken} onChange={(e) => setDraftToken(e.target.value)} placeholder="Paste your operator token" required /><button className="button primary full" type="submit">Open workspace <ArrowRight size={16} /></button></form>
-    {authError && <div role="alert" className="alert error">{authError}</div>}
-    <div className="login-foot"><LockKeyhole size={14} />Token remains in this browser tab only</div>
-  </div><div className="login-side"><div className="login-side-brand"><div className="brand-mark light"><Banknote size={19} /></div><span>clickpe</span></div><div><span className="eyebrow">BETTER MATCHES. CLEARER REASONS.</span><h2>Turn lender criteria into thoughtful next steps.</h2><p>One transparent run at a time. Every match has a source, a rule and a reason you can review.</p></div><div className="login-side-bottom">A prototype workspace · decisions stay human-reviewed</div></div></main>
-
-  return <div className="app-shell">
-    <aside className="sidebar">
-      <div className="brand"><div className="brand-mark"><Banknote size={18} strokeWidth={2.3} /></div><span>clickpe</span><span className="workspace-chip">OPS</span></div>
-      <div className="sidebar-section"><div className="sidebar-label">WORKSPACE</div><button className="nav-item active"><FileChartColumn size={17} /><span>Overview</span></button><button className="nav-item" onClick={() => document.getElementById('run-detail')?.scrollIntoView({ behavior: 'smooth' })}><FolderClock size={17} /><span>Eligibility runs</span>{dashboard?.runs.length ? <span className="nav-count">{dashboard.runs.length}</span> : null}</button><button className="nav-item" onClick={() => document.getElementById('policy-review')?.scrollIntoView({ behavior: 'smooth' })}><Banknote size={17} /><span>Policy review</span>{pendingPolicies.length ? <span className="nav-count">{pendingPolicies.length}</span> : null}</button></div>
-      <div className="sidebar-spacer" />
-      <div className="side-note"><div className="side-note-icon"><Fingerprint size={16} /></div><div><strong>Privacy first</strong><p>Names and email addresses are never passed to the matching workflow.</p></div></div>
-      <button className="nav-item side-bottom" onClick={() => { sessionStorage.removeItem('clickpe-operator-token'); setToken(''); setDraftToken('') }}><LogOut size={16} /><span>Sign out</span></button>
-      <div className="sidebar-profile"><div className="avatar">O</div><div><strong>Operator</strong><span>Eligibility team</span></div><MoreHorizontal size={18} className="profile-more" /></div>
-    </aside>
-
-    <main className="main-area">
-      <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span className="crumb-slash">/</span><strong>Overview</strong></div><div className="topbar-right"><div className="system-status"><span className={dashboard?.relay_online ? "pulse" : ""} /> {error ? 'Connection needs attention' : !dashboard?.relay_online ? 'Worker offline' : dashboard.failed_events ? 'Runs need attention' : dashboard.pending_events ? 'Processing queue' : 'Worker online'}</div><button className="icon-button" title="Refresh dashboard" onClick={() => void refresh()}><RotateCw size={16} /></button><div className="top-avatar">O</div></div></header>
-      <div className="content">
-        <div className="page-heading"><div><div className="date-eyebrow">YOUR LENDING WORKSPACE</div><h1>Good to see you, Operator <span className="wave">✳</span></h1><p>Review your latest portfolio run and what comes next.</p></div><button className="button ghost refresh-wide" onClick={() => void refresh()}><RotateCw size={15} /> Refresh</button></div>
-
-        {error && <div className={`alert ${error.includes('accepted') ? 'success' : 'error'}`} role="status"><span>{error}</span><button aria-label="Dismiss" className="alert-dismiss" onClick={() => setError('')}><X size={15} /></button></div>}
-
-        <section className="metric-grid" aria-label="Selected run metrics">{metrics.map(({ label, value, caption, icon: Icon, tone }) => <article key={label} className="metric-card"><div className="metric-top"><span>{label}</span><div className={`metric-icon ${tone}`}><Icon size={17} /></div></div><div className="metric-value">{value}</div><div className="metric-caption">{caption}</div></article>)}</section>
-
-        <div className="workspace-grid">
-          <section className="panel upload-panel"><div className="panel-heading"><div><div className="section-kicker">NEW ANALYSIS</div><h2>Import applicant profiles</h2></div><span className="format-badge">CSV · UP TO 25 MB</span></div><p className="panel-desc">Upload the standard applicant file to evaluate profiles against the active lender policies.</p><div className={`dropzone ${dragging ? 'drag-over' : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={(e) => { e.preventDefault(); setDragging(false); void upload(e.dataTransfer.files[0]) }}><div className="upload-icon"><UploadCloud size={21} /></div><strong>{loading ? 'Preparing your upload…' : 'Drop your CSV file here'}</strong><span>or browse files from your device</span><button className="button primary browse-button" disabled={loading} onClick={() => fileInput.current?.click()}>{loading ? 'Uploading' : 'Browse files'} {!loading && <ArrowRight size={14} />}</button><input ref={fileInput} type="file" accept=".csv,text/csv" hidden onChange={(e) => void upload(e.target.files?.[0])} /></div>{uploadFeedback && <div role={uploadFeedback.tone === 'error' ? 'alert' : 'status'} className={`alert ${uploadFeedback.tone} upload-feedback`}>{uploadFeedback.message}</div>}<div className="privacy-note"><ShieldCheck size={15} /><span>Names and email addresses stay inside the application database. The matcher sees eligibility fields only.</span></div></section>
-
-          <section className="panel activity-panel"><div className="panel-heading"><div><div className="section-kicker">RECENT ACTIVITY</div><h2>Your latest runs</h2></div><button className="icon-button small" title="Refresh runs" onClick={() => void refresh()}><RotateCw size={15} /></button></div>{dashboard?.runs.length ? <div className="run-list">{dashboard.runs.slice(0, 5).map((run) => <button key={run.run_id} className={`run-row ${selectedRun?.run_id === run.run_id ? 'selected' : ''}`} onClick={() => { setSelectedRun(run); setPreview(null) }}><span className={`run-icon ${run.status}`}><FileText size={16} /></span><span className="run-meta"><strong>Portfolio analysis</strong><small>{fmt(run.row_count)} applicants · {relative(run.created_at)}</small></span><span className={`status-pill ${run.status}`}>{run.status === 'completed' ? <Check size={12} /> : run.status === 'processing' ? <span className="mini-pulse" /> : null}{run.status}</span><ChevronDown className="run-chevron" size={14} /></button>)}</div> : <div className="empty-activity"><span className="empty-icon"><FolderClock size={20} /></span><strong>No analysis runs yet</strong><span>Upload your first applicant CSV to get started.</span></div>}<button className="text-action" onClick={() => document.getElementById('run-detail')?.scrollIntoView({ behavior: 'smooth' })}>View selected run <ArrowRight size={14} /></button></section>
+      let uploadId: string;
+      if (dashboard.storage_mode === "s3") {
+        const signed = await request<{
+          upload_id: string;
+          upload: { url: string; fields: Record<string, string> };
+        }>(`/api/uploads?filename=${encodeURIComponent(file.name)}`, {
+          method: "POST",
+        });
+        const body = new FormData();
+        Object.entries(signed.upload.fields).forEach(([key, value]) =>
+          body.append(key, value),
+        );
+        body.append("file", file);
+        await sendFile(signed.upload.url, body, false);
+        uploadId = signed.upload_id;
+      } else {
+        const body = new FormData();
+        body.append("file", file);
+        const response = await sendFile(`${API}/api/uploads/local`, body, true);
+        if (!response.upload_id)
+          throw new Error(
+            "Upload confirmation was incomplete. Check recent files before trying again.",
+          );
+        uploadId = response.upload_id;
+      }
+      setJob(
+        (old) =>
+          old && {
+            ...old,
+            upload_id: uploadId,
+            phase: "import",
+            percent: 100,
+            confirming: false,
+          },
+      );
+    } catch (e) {
+      setJob(
+        (old) =>
+          old && { ...old, phase: "failed", error: (e as Error).message },
+      );
+    } finally {
+      transferring.current = false;
+    }
+  };
+  const retry = async (runId: string) => {
+    await request(`/api/runs/${runId}/retry`, { method: "POST" });
+    const run = await request<Run>(`/api/runs/${runId}/progress`);
+    setJob({
+      filename: run.filename,
+      started: Date.now(),
+      upload_id: run.upload_id,
+      run_id: runId,
+      phase: "match",
+      percent: 100,
+      run,
+    });
+    await refresh();
+  };
+  const moreRuns = async () => {
+    const r = await request<{ items: Run[]; total: number }>(
+      `/api/runs?limit=20&offset=${runs.length}`,
+    );
+    setRuns((old) => [
+      ...old,
+      ...r.items.filter((item) => !old.some((r) => r.run_id === item.run_id)),
+    ]);
+    setTotalRuns(r.total);
+  };
+  return (
+    <Context.Provider
+      value={{
+        token,
+        setToken,
+        authError,
+        dashboard,
+        runs,
+        totalRuns,
+        pending,
+        error,
+        request,
+        refresh,
+        job,
+        upload,
+        clearJob: () => setJob(null),
+        retry,
+        moreRuns,
+      }}
+    >
+      {children}
+    </Context.Provider>
+  );
+}
+function Status({ value }: { value: string }) {
+  return <span className={`status ${value}`}>{labels[value] || value}</span>;
+}
+function SignIn() {
+  const { setToken, authError } = useWorkspace(),
+    [draft, setDraft] = useState(""),
+    [error, setError] = useState(""),
+    [busy, setBusy] = useState(false);
+  return (
+    <main className="login">
+      <div className="login-card">
+        <div className="brand">
+          <Banknote />
+          clickpe
         </div>
-
-        {preview && <section className="alert preview-info" role="status"><div><strong>Preview ready</strong><span>{fmt(preview.eligible_matches)} eligible matches across {fmt(preview.distinct_email_addresses)} unique email addresses. This preview action sends no emails.</span></div><button className="alert-dismiss" onClick={() => setPreview(null)}><X size={16} /></button></section>}
-
-        <section className="panel results-panel" id="run-detail"><div className="results-heading"><div><div className="section-kicker">DECISION REVIEW</div><h2>{selectedRun ? 'Applicant results' : 'Results will appear here'}</h2><p>{selectedRun ? `Run ${selectedRun.run_id.slice(0, 8)} · ${fmt(selectedRun.row_count)} applicant profiles` : 'Select a completed analysis run to explore the matches.'}</p></div><div className="result-actions"><div className="filter-control"><Search size={14} /><select value={filter} onChange={(e) => setFilter(e.target.value as typeof filter)} aria-label="Filter results"><option value="all">All decisions</option><option value="eligible">Eligible</option><option value="review">Needs review</option><option value="ineligible">Do not qualify</option></select><ChevronDown size={14} /></div><button className="button outline" onClick={() => void makePreview()} disabled={!selectedRun || selectedRun.status !== 'completed'}><CirclePlay size={15} /> Notification preview</button></div></div>
-          {selectedRun?.status === 'processing' || selectedRun?.status === 'queued' ? <div className="processing-banner"><span className="loading-spinner" /><span><strong>Your results are on the way</strong><small>{fmt(selectedRun.processed_decisions || 0)} of {fmt(selectedRun.row_count * (selectedRun.product_count || 0))} decisions saved. This view refreshes automatically.</small></span><span className="processing-status">{selectedRun.status}</span></div> : null}
-          {selectedRun?.status === 'failed' && <div className="processing-banner error-banner"><span><strong>This run needs attention</strong><small>{uploadErrorMessages[selectedRun.error_code || ''] || 'The workflow could not finish. Retry to resume from the last saved batch.'}</small></span><button className="button outline" disabled={retrying} onClick={() => void retryRun()}>{retrying ? 'Retrying...' : 'Retry run'}</button></div>}
-          {resultsLoading && <p role="status" className="results-loading">Loading results...</p>}
-          {results.length ? <><div className="results-table-wrap"><table><thead><tr><th>APPLICANT ID</th><th>LENDER PRODUCT</th><th>DECISION</th><th>WHY THIS RESULT</th><th></th></tr></thead><tbody>{results.map((result) => <tr key={result.result_id}><td><span className="user-id">{result.user_id}</span></td><td><div className="product-cell"><div className="bank-icon"><Banknote size={15} /></div><span><strong>{result.lender}</strong><small>{result.product_name}</small></span></div></td><td><span className={`decision ${result.decision}`}>{result.decision === 'eligible' ? <BadgeCheck size={13} /> : result.decision === 'review' ? <CircleHelp size={13} /> : <ShieldCheck size={13} />}{result.decision === 'ineligible' ? 'Does not qualify' : result.decision === 'review' ? 'Needs review' : 'Eligible'}</span></td><td><span className="reason-text">{result.reasons.find((reason) => reason.status === 'fail')?.criterion?.replace('_', ' ') || result.reasons.find((reason) => reason.status === 'unknown' || reason.status === 'review')?.message || 'All confirmed criteria are met'}</span></td><td><button className="row-more" title="Decision details" onClick={() => setSelectedMatch(result)}><MoreHorizontal size={17} /></button></td></tr>)}</tbody></table></div><div className="table-footer"><span>Showing {fmt(page * 40 + 1)}-{fmt(page * 40 + results.length)} of {fmt(totalResults)} results</span><div className="pagination"><button className="button outline" disabled={page === 0 || resultsLoading} onClick={() => setPage((p) => p - 1)}>Previous</button><button className="button outline" disabled={(page + 1) * 40 >= totalResults || resultsLoading} onClick={() => setPage((p) => p + 1)}>Next</button></div></div></> : selectedRun?.status === 'completed' ? <div className="empty-results"><div className="empty-icon"><FileChartColumn size={19} /></div><strong>No results for this filter</strong><span>Choose another decision filter to explore this run.</span></div> : null}
-        </section>
-
-        <section id="policy-review" className="policy-review-section"><div className="lender-heading"><div><div className="section-kicker">HUMAN REVIEW</div><h2>Policy changes to review</h2><p>AI extracts source terms for review. It never changes a live rule by itself.</p></div><span className="review-count">{pendingPolicies.length} awaiting</span></div>{pendingPolicies.length ? <div className="pending-policy-grid">{pendingPolicies.map((policy) => <article className="pending-policy" key={policy.snapshot_id}><div className="pending-policy-top"><div className="lender-logo">{policy.lender === 'Axis Bank' ? 'A' : 'B'}</div><div><strong>{policy.lender} · {policy.product_name}</strong><span>Extracted {relative(policy.observed_at)} · {policy.model_provider} / {policy.model_name}</span></div></div><div className="criteria-chips">{policy.advertised_rate && <span><b>Advertised rate</b>{policy.advertised_rate}</span>}{Object.entries(policy.rules).filter(([key]) => key !== 'version' && key !== 'incomplete_eligibility').map(([key, rule]) => <span key={key}><b>{key.replace('_', ' ')}</b> {rule.kind === 'unknown' ? 'not found' : rule.kind === 'required' || rule.kind === 'preferred' ? `${rule.min ?? rule.status ?? ''}${rule.max ? `–${rule.max}` : ''}${rule.currency ? ` ${rule.currency}` : ''}${rule.kind === 'preferred' ? ' preferred' : ''}${rule.location_dependent ? ' · location based' : ''}` : rule.status}</span>)}</div><details className="source-evidence"><summary>Review source excerpt and criteria</summary><p>{policy.reviewer_note}</p><pre>{policy.source_excerpt}</pre><a href={policy.source_url} target="_blank" rel="noreferrer">Open official source <ArrowRight size={12} /></a></details><div className="pending-policy-actions"><span><ShieldCheck size={13} />Manual approval changes future runs</span><button className="button primary" onClick={() => void approvePolicy(policy)}><Check size={14} /> Approve criteria</button></div></article>)}</div> : <div className="empty-policy"><span className="source-count-dot" /><span>All active lender criteria have an approved source.</span></div>}</section>
-
-        <section id="lenders" className="lender-section"><div className="lender-heading"><div><div className="section-kicker">ACTIVE SOURCES</div><h2>Current policy catalogue</h2><p>New analyses pin these versions. Open a decision to see the policy used for that run.</p></div><span className="source-count"><span className="source-count-dot" />{dashboard?.products.length || 0} sources active</span></div><div className="lender-grid">{dashboard?.products.map((product, index) => <article key={product.product_id} className="lender-card"><div className={`lender-logo ${index ? 'bajaj' : 'axis'}`}>{index ? 'B' : 'A'}</div><div className="lender-copy"><strong>{product.lender}</strong><span>{product.product_name}</span>{product.advertised_rate && <span>Advertised rate: {product.advertised_rate}</span>}<a href={product.product_url} target="_blank" rel="noreferrer">Official eligibility page <ArrowRight size={12} /></a></div><div className="policy-verified"><span className="verified-dot" /><span>{product.extraction_status === 'approved' ? `Reviewed ${product.observed_at ? relative(product.observed_at) : 'baseline'}` : 'Needs review'}</span></div></article>)}</div></section>
-
-        <footer className="page-footer"><span>ClickPe eligibility workspace</span><span>Screening aid only · lender decisions remain independent</span><a href="mailto:hello@clickpe.ai">Need a hand? <CircleHelp size={13} /></a></footer>
+        <h1>Operations workspace</h1>
+        <p>
+          Sign in to import applicants, review matches and manage lender
+          policies.
+        </p>
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setBusy(true);
+            setError("");
+            try {
+              const r = await fetch(`${API}/api/dashboard`, {
+                headers: { "X-Operator-Token": draft.trim() },
+              });
+              if (!r.ok)
+                throw new Error(
+                  r.status === 401
+                    ? "That operator token was not accepted."
+                    : "The workspace is unavailable. Try again shortly.",
+                );
+              setToken(draft.trim());
+            } catch (e) {
+              setError((e as Error).message);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <label htmlFor="token">Operator token</label>
+          <input
+            id="token"
+            type="password"
+            required
+            autoComplete="current-password"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <button className="button primary" disabled={busy}>
+            {busy ? "Signing in…" : "Open workspace"}
+            <ArrowRight size={16} />
+          </button>
+        </form>
+        {(error || authError) && (
+          <p className="alert" role="alert">
+            {error || authError}
+          </p>
+        )}
+        <small>Your session is kept in this browser tab.</small>
       </div>
-    <dialog ref={detailDialog} className="decision-dialog" onClose={() => setSelectedMatch(null)} aria-labelledby="decision-title">
-      {selectedMatch && <><div className="dialog-heading"><div><div className="section-kicker">DECISION EVIDENCE</div><h2 id="decision-title">{selectedMatch.product_name}</h2><p>Applicant {selectedMatch.user_id} - {selectedMatch.decision}</p></div><button autoFocus className="icon-button" aria-label="Close decision details" onClick={() => setSelectedMatch(null)}><X size={20} /></button></div>
-      <dl className="snapshot-details"><div><dt>Policy snapshot</dt><dd>{selectedMatch.snapshot_id}</dd></div><div><dt>Rule version</dt><dd>{selectedMatch.rule_version}</dd></div><div><dt>Source observed</dt><dd>{new Date(selectedMatch.observed_at).toLocaleString('en-IN')}</dd></div></dl>
-      <a href={selectedMatch.source_url} target="_blank" rel="noreferrer">View official policy source</a>
-      <div className="evidence-list">{selectedMatch.reasons.map((reason, index) => <article key={index}><strong>{reason.criterion.replaceAll('_', ' ')} <span className={`decision ${reason.status === 'fail' ? 'ineligible' : reason.status === 'pass' ? 'eligible' : 'review'}`}>{reason.status}</span></strong><p>{reason.observed_value !== undefined ? `Observed: ${reason.observed_value}. ` : ''}{reason.required_value ? `Required: ${reason.required_value}. ` : ''}{reason.minimum !== undefined ? `Minimum: ${reason.minimum}${reason.currency ? ` ${reason.currency}` : ''}. ` : ''}{reason.maximum !== undefined ? `Maximum: ${reason.maximum}. ` : ''}{reason.preferred_minimum !== undefined ? `Preferred minimum: ${reason.preferred_minimum}. ` : ''}{reason.message}</p></article>)}</div></>}
-    </dialog>
     </main>
-  </div>
+  );
+}
+function Shell() {
+  const { token, setToken, error, refresh, job } = useWorkspace(),
+    location = useLocation();
+  if (!token) return <SignIn />;
+  const current =
+    location.pathname === "/policies"
+      ? "Policies"
+      : location.pathname === "/applicants"
+        ? "Applicants"
+        : "Overview";
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <Link className="brand" to="/overview">
+          <Banknote />
+          clickpe
+        </Link>
+        <span className="workspace-label">OPERATIONS</span>
+        <nav aria-label="Workspace">
+          <NavLink to="/overview">
+            <LayoutDashboard size={19} />
+            Overview
+          </NavLink>
+          <NavLink to="/applicants">
+            <Users size={19} />
+            Applicants
+          </NavLink>
+          <NavLink to="/policies">
+            <ShieldCheck size={19} />
+            Policies
+          </NavLink>
+          <button
+            className="mobile-signout"
+            aria-label="Sign out"
+            onClick={() => setToken("")}
+          >
+            <LogOut size={16} />
+          </button>
+        </nav>
+        <div className="sidebar-foot">
+          <span>Operator workspace</span>
+          <button onClick={() => setToken("")}>
+            <LogOut size={17} />
+            Sign out
+          </button>
+        </div>
+      </aside>
+      <div className="main">
+        <header className="topbar">
+          <span>
+            Workspace <span className="muted">/</span>{" "}
+            <strong>{current}</strong>
+          </span>
+          <button
+            className="icon-button"
+            aria-label="Refresh workspace"
+            onClick={() => void refresh()}
+          >
+            <RefreshCw size={17} />
+          </button>
+        </header>
+        <main className="content">
+          {error && (
+            <div role="alert" className="alert">
+              {error}
+              <button onClick={() => void refresh()}>Try again</button>
+            </div>
+          )}
+          {job && current !== "Overview" && (
+            <Link className="job-link" to="/overview">
+              {job.phase === "ready"
+                ? "Your applicants are ready"
+                : job.phase === "failed"
+                  ? "An upload needs attention"
+                  : `Processing ${job.filename}`}
+              <ArrowRight size={16} />
+            </Link>
+          )}
+          <Routes>
+            <Route path="/" element={<Navigate to="/overview" replace />} />
+            <Route path="/overview" element={<Overview />} />
+            <Route path="/applicants" element={<Applicants />} />
+            <Route path="/policies" element={<Policies />} />
+            <Route
+              path="*"
+              element={
+                <div className="empty">
+                  <h1>Page not found</h1>
+                  <Link to="/overview">Return to overview</Link>
+                </div>
+              }
+            />
+          </Routes>
+          <footer>ClickPe · Eligibility screening workspace</footer>
+        </main>
+      </div>
+    </div>
+  );
+}
+function Heading({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="heading">
+      <h1>{title}</h1>
+      <p>{children}</p>
+    </div>
+  );
+}
+function Progress() {
+  const { job, clearJob, retry } = useWorkspace(),
+    [now, setNow] = useState(Date.now()),
+    [error, setError] = useState(""),
+    [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (!job) return null;
+  const step = {
+    upload: 0,
+    import: 1,
+    match: 2,
+    ready: 3,
+    failed: job.run_id ? 2 : job.upload_id ? 1 : 0,
+  }[job.phase];
+  const total = (job.run?.row_count || 0) * (job.run?.product_count || 0),
+    processed = job.run?.processed_decisions || 0;
+  const percent =
+    job.phase === "upload"
+      ? job.percent
+      : job.phase === "ready"
+        ? 100
+        : total
+          ? Math.min(100, (processed / total) * 100)
+          : 0;
+  return (
+    <section className="panel progress-panel" aria-label="Upload progress">
+      <div className="section-title">
+        <div>
+          <h2>
+            {job.phase === "ready"
+              ? "Applicants are ready"
+              : job.phase === "failed"
+                ? "This file needs attention"
+                : "Preparing your applicants"}
+          </h2>
+          <p className="filename">{job.filename}</p>
+        </div>
+        {(job.phase === "ready" || job.phase === "failed") && (
+          <button
+            className="icon-button"
+            aria-label="Dismiss upload status"
+            onClick={clearJob}
+          >
+            <X size={18} />
+          </button>
+        )}
+      </div>
+      <ol className="steps">
+        {["Upload", "Import", "Match", "Ready"].map((label, i) => (
+          <li
+            key={label}
+            className={
+              i < step || job.phase === "ready"
+                ? "done"
+                : i === step
+                  ? "current"
+                  : ""
+            }
+          >
+            <span>
+              {i < step || job.phase === "ready" ? <Check size={14} /> : i + 1}
+            </span>
+            {label}
+          </li>
+        ))}
+      </ol>
+      <div role="status" aria-live="polite" className="progress-copy">
+        {job.reconnecting ? (
+          <>
+            <LoaderCircle className="spinner" size={17} />
+            Reconnecting · your file continues processing
+          </>
+        ) : job.phase === "upload" ? (
+          <>
+            <LoaderCircle className="spinner" size={17} />
+            {job.confirming
+              ? "100% sent · confirming receipt…"
+              : `Uploading · ${job.percent}%`}
+          </>
+        ) : job.phase === "import" ? (
+          <>
+            <LoaderCircle className="spinner" size={17} />
+            Importing applicant rows · {Math.floor((now - job.started) / 1000)}s
+            elapsed
+          </>
+        ) : job.phase === "match" ? (
+          <>
+            <LoaderCircle className="spinner" size={17} />
+            {fmt(processed)} of {fmt(total)} lender decisions saved
+          </>
+        ) : job.phase === "ready" ? (
+          `${fmt(job.run?.row_count || 0)} applicants checked against ${job.run?.product_count || 0} lender products`
+        ) : (
+          job.error
+        )}
+      </div>
+      {(job.phase === "upload" || job.phase === "match") && (
+        <progress
+          max="100"
+          value={percent}
+          aria-label={
+            job.phase === "upload" ? "File transfer" : "Lender matching"
+          }
+        />
+      )}
+      {job.phase === "import" && (
+        <p className="muted small">
+          You can keep working here. Progress continues across workspace pages.
+        </p>
+      )}
+      {job.phase === "ready" && (
+        <Link className="button primary" to={`/applicants?run=${job.run_id}`}>
+          View applicants
+          <ArrowRight size={16} />
+        </Link>
+      )}
+      {job.phase === "failed" && job.run_id && (
+        <button
+          className="button outline"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setError("");
+            try {
+              await retry(job.run_id!);
+            } catch (e) {
+              setError((e as Error).message);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? "Retrying…" : "Retry matching"}
+        </button>
+      )}
+      {error && (
+        <p role="alert" className="alert">
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
+function Overview() {
+  const { dashboard, runs, totalRuns, pending, job, upload } = useWorkspace(),
+    file = useRef<HTMLInputElement>(null),
+    [dragging, setDragging] = useState(false);
+  const busy = !!job && ["upload", "import", "match"].includes(job.phase);
+  return (
+    <>
+      <Heading title="Overview">
+        Import an applicant file and follow its progress through eligibility
+        matching.
+      </Heading>
+      <section className="metrics" aria-label="Workspace summary">
+        {[
+          ["Applicants imported", dashboard?.total_rows],
+          ["Analysis runs", totalRuns],
+          ["Active lender products", dashboard?.products.length],
+          ["Policy changes to review", pending.length],
+        ].map(([label, value]) => (
+          <article className="metric" key={label}>
+            <span>{label}</span>
+            <strong>{dashboard ? fmt(Number(value)) : "—"}</strong>
+          </article>
+        ))}
+      </section>
+      <div className="overview-grid">
+        <section className="panel upload-panel">
+          <div className="section-title">
+            <div>
+              <h2>Import applicants</h2>
+              <p>Start a new eligibility analysis with a CSV file.</p>
+            </div>
+            <UploadCloud size={23} />
+          </div>
+          <button
+            className={`dropzone ${dragging ? "dragging" : ""}`}
+            disabled={busy || !dashboard}
+            onClick={() => file.current?.click()}
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (!busy) setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              if (!busy && e.dataTransfer.files[0])
+                void upload(e.dataTransfer.files[0]);
+            }}
+          >
+            <UploadCloud size={30} />
+            <strong>
+              {busy
+                ? "Your file is being processed"
+                : "Choose a CSV or drop it here"}
+            </strong>
+            <span>
+              Up to{" "}
+              {dashboard
+                ? Math.round(dashboard.max_upload_bytes / 1024 / 1024)
+                : 25}{" "}
+              MiB · 100,000 applicants
+            </span>
+          </button>
+          <input
+            hidden
+            ref={file}
+            type="file"
+            accept=".csv,text/csv"
+            aria-label="Applicant CSV"
+            onChange={(e) => {
+              const selected = e.target.files?.[0];
+              e.target.value = "";
+              if (selected) void upload(selected);
+            }}
+          />
+          <details className="csv-help">
+            <summary>Required CSV columns</summary>
+            <code>
+              user_id, name, email, monthly_income, credit_score,
+              employment_status, age
+            </code>
+            <p>
+              Use UTF-8. Each applicant needs a unique user_id. Income is
+              monthly, in INR.
+            </p>
+          </details>
+        </section>
+        {job ? (
+          <Progress />
+        ) : (
+          <section className="panel guide">
+            <FileText size={26} />
+            <h2>From file to clear next steps</h2>
+            <p>
+              Each applicant is checked against the lender policies active when
+              the analysis starts.
+            </p>
+            <p>
+              Review matched products and the reasons behind every lender
+              decision on the Applicants page.
+            </p>
+            <Link to="/policies">
+              View active policies
+              <ArrowRight size={15} />
+            </Link>
+          </section>
+        )}
+      </div>
+      <section className="panel">
+        <div className="section-title">
+          <div>
+            <h2>Recent files</h2>
+            <p>Your latest applicant analyses.</p>
+          </div>
+          <Link to="/applicants">
+            Browse applicants
+            <ArrowRight size={15} />
+          </Link>
+        </div>
+        {runs.length ? (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>File</th>
+                  <th>Imported</th>
+                  <th>Applicants</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {runs.slice(0, 8).map((run) => (
+                  <tr key={run.run_id}>
+                    <td>
+                      <strong>{run.filename}</strong>
+                    </td>
+                    <td>{date(run.created_at)}</td>
+                    <td>{fmt(run.row_count)}</td>
+                    <td>
+                      <Status value={run.status} />
+                    </td>
+                    <td>
+                      <Link
+                        className="row-link"
+                        to={`/applicants?run=${run.run_id}`}
+                      >
+                        Open
+                        <ArrowRight size={14} />
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="empty">
+            <FileText />
+            <h3>
+              {dashboard ? "No files imported yet" : "Loading recent files…"}
+            </h3>
+            <p>Your first analysis will appear here after import.</p>
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+function useRun(runId: string, revision = 0) {
+  const { request } = useWorkspace(),
+    [run, setRun] = useState<Run | null>(null),
+    [error, setError] = useState("");
+  useEffect(() => {
+    setRun(null);
+    setError("");
+    if (!runId) return;
+    const controller = new AbortController();
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const data = await request<Run>(`/api/runs/${runId}/progress`, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setRun(data);
+        setError("");
+        if (!["completed", "failed"].includes(data.status))
+          timer = window.setTimeout(poll, 3000);
+      } catch (e) {
+        if (!controller.signal.aborted) {
+          setError((e as Error).message);
+          timer = window.setTimeout(poll, 6000);
+        }
+      }
+    };
+    void poll();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [runId, request, revision]);
+  return { run, error };
+}
+function Applicants() {
+  const { runs, totalRuns, moreRuns, request, retry, dashboard } =
+      useWorkspace(),
+    [params, setParams] = useSearchParams();
+  const runId = params.get("run") || runs[0]?.run_id || "",
+    status = params.get("status") || "",
+    product = params.get("product") || "",
+    q = params.get("q") || "";
+  const size = [25, 50, 100].includes(Number(params.get("size")))
+    ? Number(params.get("size"))
+    : 25;
+  const page = Math.max(
+    1,
+    Math.min(
+      Math.ceil(100000 / size),
+      Math.floor(Number(params.get("page"))) || 1,
+    ),
+  );
+  const [revision, setRevision] = useState(0);
+  const { run, error: runError } = useRun(runId, revision);
+  const [data, setData] = useState<{
+      items: Applicant[];
+      total: number;
+    } | null>(null),
+    [loading, setLoading] = useState(false),
+    [error, setError] = useState(""),
+    [selected, setSelected] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{
+      eligible_matches: number;
+      distinct_email_addresses: number;
+    } | null>(null),
+    [busy, setBusy] = useState(false),
+    [jump, setJump] = useState("");
+  const update = (changes: Record<string, string>, reset = true) => {
+    const next = new URLSearchParams(params);
+    next.set("run", runId);
+    if (reset) next.delete("page");
+    Object.entries(changes).forEach(([key, value]) => {
+      if (value) next.set(key, value);
+      else next.delete(key);
+    });
+    setParams(next);
+  };
+  useEffect(() => {
+    if (!params.get("run") && runId) {
+      const next = new URLSearchParams(params);
+      next.set("run", runId);
+      setParams(next, { replace: true });
+    }
+  }, [params, runId, setParams]);
+  useEffect(() => {
+    setPreview(null);
+    setSelected(null);
+  }, [runId]);
+  useEffect(() => {
+    setData(null);
+    setError("");
+    if (!runId) return;
+    const controller = new AbortController();
+    setLoading(true);
+    const query = new URLSearchParams({
+      limit: String(size),
+      offset: String((page - 1) * size),
+    });
+    if (status) query.set("status", status);
+    if (product) query.set("matched_product_id", product);
+    if (q) query.set("q", q);
+    const timer = window.setTimeout(
+      () => {
+        void request<{ items: Applicant[]; total: number }>(
+          `/api/runs/${runId}/applicants?${query}`,
+          { signal: controller.signal },
+        )
+          .then((result) => {
+            if (controller.signal.aborted) return;
+            const last = Math.max(1, Math.ceil(result.total / size));
+            if (page > last) {
+              const next = new URLSearchParams(params);
+              next.set("page", String(last));
+              setParams(next, { replace: true });
+              return;
+            }
+            setData(result);
+          })
+          .catch((e) => {
+            if (!controller.signal.aborted) setError((e as Error).message);
+          })
+          .finally(() => {
+            if (!controller.signal.aborted) setLoading(false);
+          });
+      },
+      q ? 250 : 0,
+    );
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [
+    request,
+    runId,
+    status,
+    product,
+    q,
+    size,
+    page,
+    run?.processed_decisions,
+    params,
+    setParams,
+  ]);
+  const pages = Math.max(1, Math.ceil((data?.total || 0) / size)),
+    numbers = [
+      ...new Set([
+        1,
+        ...Array.from({ length: 5 }, (_, i) => page - 2 + i).filter(
+          (n) => n > 1 && n < pages,
+        ),
+        pages,
+      ]),
+    ].sort((a, b) => a - b);
+  const products = [
+    ...new Map(
+      (data?.items.flatMap((item) => item.matched_products) || []).map(
+        (item) => [item.product_id, item],
+      ),
+    ).values(),
+  ];
+  return (
+    <>
+      <Heading title="Applicants">
+        Review each applicant’s matched products and every lender decision.
+      </Heading>
+      <section className="panel run-picker">
+        <label htmlFor="run">Analysis file</label>
+        <div className="inline">
+          <select
+            id="run"
+            value={runId}
+            onChange={(e) =>
+              update({ run: e.target.value, status: "", product: "", q: "" })
+            }
+          >
+            {!runId && <option value="">No analyses available</option>}
+            {runId && !runs.some((r) => r.run_id === runId) && (
+              <option value={runId}>
+                {run?.filename || "Selected analysis"}
+              </option>
+            )}
+            {runs.map((r) => (
+              <option key={r.run_id} value={r.run_id}>
+                {r.filename} · {date(r.created_at)}
+              </option>
+            ))}
+          </select>
+          {runs.length < totalRuns && (
+            <button
+              className="button outline"
+              onClick={() =>
+                void moreRuns().catch((e) => setError((e as Error).message))
+              }
+            >
+              Load older files
+            </button>
+          )}
+          {run && <Status value={run.status} />}
+        </div>
+      </section>
+      {!runId ? (
+        <div className="panel empty">
+          <Users />
+          <h2>Import your first applicant file</h2>
+          <p>Completed and in-progress analyses will be available here.</p>
+          <Link className="button primary" to="/overview">
+            Import applicants
+          </Link>
+        </div>
+      ) : (
+        <>
+          {runError && (
+            <p className="alert" role="alert">
+              {runError}
+            </p>
+          )}
+          {run && (
+            <section
+              className="metrics applicant-metrics"
+              aria-label="Applicant summary"
+            >
+              {["matched", "review", "unmatched", "processing"].map((key) => (
+                <article className="metric" key={key}>
+                  <span>{labels[key]}</span>
+                  <strong>{fmt(run.applicant_summary?.[key] || 0)}</strong>
+                </article>
+              ))}
+            </section>
+          )}
+          {run && !["completed", "failed"].includes(run.status) && (
+            <div className="notice" role="status">
+              <LoaderCircle size={18} className="spinner" />
+              <span>
+                Matching in progress · {fmt(run.processed_decisions || 0)} of{" "}
+                {fmt(run.row_count * (run.product_count || 0))} lender decisions
+                saved. Results update automatically.
+              </span>
+            </div>
+          )}
+          {run?.status === "failed" && (
+            <div className="alert">
+              <span>
+                {errors[run.error_code || ""] ||
+                  "This analysis could not finish. Retry matching to resume."}
+              </span>
+              <button
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    await retry(runId);
+                    setRevision((n) => n + 1);
+                  } catch (e) {
+                    setError((e as Error).message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                Retry matching
+              </button>
+            </div>
+          )}
+          <section className="panel applicants-panel">
+            <div className="filters">
+              <label>
+                Applicant reference
+                <input
+                  type="search"
+                  placeholder="Search by ID prefix"
+                  value={q}
+                  maxLength={128}
+                  onChange={(e) => update({ q: e.target.value })}
+                />
+              </label>
+              <label>
+                Status
+                <select
+                  value={status}
+                  onChange={(e) => update({ status: e.target.value })}
+                >
+                  <option value="">All applicants</option>
+                  {["matched", "review", "unmatched", "processing"].map(
+                    (key) => (
+                      <option key={key} value={key}>
+                        {labels[key]}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+              <label>
+                Matched lender product
+                <select
+                  value={product}
+                  onChange={(e) => update({ product: e.target.value })}
+                >
+                  <option value="">All products</option>
+                  {[
+                    ...new Map(
+                      [
+                        ...(run?.products || dashboard?.products || []),
+                        ...products,
+                      ].map((p) => [p.product_id, p]),
+                    ).values(),
+                  ].map((p) => (
+                    <option key={p.product_id} value={p.product_id}>
+                      {p.lender} · {p.product_name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {error && (
+              <p className="alert" role="alert">
+                {error}
+              </p>
+            )}
+            <div className="table-wrap applicant-table" aria-busy={loading}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Applicant reference</th>
+                    <th>Matched lender products</th>
+                    <th>Status</th>
+                    <th>
+                      <span className="sr-only">Details</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading
+                    ? Array.from({ length: 8 }, (_, i) => (
+                        <tr key={i}>
+                          <td>
+                            <span className="skeleton" />
+                          </td>
+                          <td>
+                            <span className="skeleton wide" />
+                          </td>
+                          <td>
+                            <span className="skeleton" />
+                          </td>
+                          <td />
+                        </tr>
+                      ))
+                    : data?.items.map((item) => (
+                        <tr key={item.user_id}>
+                          <td>
+                            <strong>{item.user_id}</strong>
+                          </td>
+                          <td>
+                            <div className="chips">
+                              {item.matched_products.map((p) => (
+                                <span key={p.product_id} title={p.product_name}>
+                                  {p.lender} · {p.product_name}
+                                </span>
+                              ))}
+                              {!item.matched_products.length && (
+                                <span className="muted">
+                                  {item.status === "processing"
+                                    ? "Awaiting completed checks"
+                                    : "No eligible products"}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td>
+                            <Status value={item.status} />
+                          </td>
+                          <td>
+                            <button
+                              className="row-link"
+                              aria-label={`View decisions for ${item.user_id}`}
+                              onClick={() => setSelected(item.user_id)}
+                            >
+                              View decisions
+                              <ArrowRight size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                </tbody>
+              </table>
+              {!loading && data?.items.length === 0 && (
+                <div className="empty">
+                  <Users />
+                  <h3>No applicants match these filters</h3>
+                  <p>Try another reference, status or lender product.</p>
+                  <button
+                    className="button outline"
+                    onClick={() => update({ q: "", status: "", product: "" })}
+                  >
+                    Clear filters
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="pagination">
+              <div className="pagination-summary" role="status">
+                {loading
+                  ? "Loading applicants…"
+                  : `${fmt(data?.total ? (page - 1) * size + 1 : 0)}–${fmt(Math.min(page * size, data?.total || 0))} of ${fmt(data?.total || 0)} applicants`}
+                <label>
+                  Per page
+                  <select
+                    value={size}
+                    onChange={(e) => update({ size: e.target.value })}
+                  >
+                    {[25, 50, 100].map((n) => (
+                      <option key={n}>{n}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <nav aria-label="Applicant pages">
+                <button
+                  disabled={loading || page <= 1}
+                  onClick={() => update({ page: "1" }, false)}
+                >
+                  First
+                </button>
+                <button
+                  aria-label="Previous page"
+                  disabled={loading || page <= 1}
+                  onClick={() => update({ page: String(page - 1) }, false)}
+                >
+                  <ChevronLeft size={16} />
+                </button>
+                {numbers.map((n, i) => (
+                  <span key={n}>
+                    {i > 0 && n - numbers[i - 1] > 1 && (
+                      <span className="ellipsis">…</span>
+                    )}
+                    <button
+                      aria-current={n === page ? "page" : undefined}
+                      disabled={loading}
+                      onClick={() => update({ page: String(n) }, false)}
+                    >
+                      {n}
+                    </button>
+                  </span>
+                ))}
+                <button
+                  aria-label="Next page"
+                  disabled={loading || page >= pages}
+                  onClick={() => update({ page: String(page + 1) }, false)}
+                >
+                  <ChevronRight size={16} />
+                </button>
+                <button
+                  disabled={loading || page >= pages}
+                  onClick={() => update({ page: String(pages) }, false)}
+                >
+                  Last
+                </button>
+              </nav>
+              <form
+                className="page-jump"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  update(
+                    {
+                      page: String(
+                        Math.max(1, Math.min(pages, Number(jump) || 1)),
+                      ),
+                    },
+                    false,
+                  );
+                  setJump("");
+                }}
+              >
+                <label htmlFor="jump">Go to page</label>
+                <input
+                  id="jump"
+                  inputMode="numeric"
+                  type="number"
+                  min="1"
+                  max={pages}
+                  value={jump}
+                  onChange={(e) => setJump(e.target.value)}
+                />
+                <button disabled={loading}>Go</button>
+              </form>
+            </div>
+          </section>
+          {run?.status === "completed" && (
+            <section className="panel notification">
+              <div>
+                <h2>Notification preview</h2>
+                <p>
+                  Preview the eligible matches and distinct applicant email
+                  addresses for this file.
+                </p>
+                {preview && (
+                  <p role="status">
+                    <strong>
+                      {fmt(preview.eligible_matches)} eligible matches
+                    </strong>{" "}
+                    across {fmt(preview.distinct_email_addresses)} email
+                    addresses.
+                  </p>
+                )}
+              </div>
+              <button
+                className="button outline"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    setPreview(
+                      await request(`/api/runs/${runId}/notification-preview`, {
+                        method: "POST",
+                        body: "{}",
+                      }),
+                    );
+                  } catch (e) {
+                    setError((e as Error).message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                Preview notifications
+              </button>
+            </section>
+          )}
+          <NotificationSummary runId={runId} />
+        </>
+      )}
+      {selected && (
+        <ApplicantDrawer
+          runId={runId}
+          userId={selected}
+          close={() => setSelected(null)}
+        />
+      )}
+    </>
+  );
+}
+function NotificationSummary({ runId }: { runId: string }) {
+  const { request } = useWorkspace(),
+    [counts, setCounts] = useState<Record<string, number> | null>(null);
+  useEffect(() => {
+    const c = new AbortController();
+    const load = () =>
+      void request<Record<string, number>>(`/api/runs/${runId}/notifications`, {
+        signal: c.signal,
+      })
+        .then((d) => {
+          if (!c.signal.aborted) setCounts(d);
+        })
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 6000);
+    return () => {
+      c.abort();
+      clearInterval(t);
+    };
+  }, [request, runId]);
+  return (
+    counts && (
+      <section
+        className="notification-summary"
+        aria-label="Notification status"
+      >
+        <strong>Notifications</strong>
+        <span>Preview ready: {fmt(counts.preview_ready)}</span>
+        <span>Sent: {fmt(counts.sent)}</span>
+        <span>Pending: {fmt(counts.pending)}</span>
+        <span>Needs attention: {fmt(counts.needs_attention)}</span>
+      </section>
+    )
+  );
+}
+function ApplicantDrawer({
+  runId,
+  userId,
+  close,
+}: {
+  runId: string;
+  userId: string;
+  close: () => void;
+}) {
+  const { request } = useWorkspace(),
+    dialog = useRef<HTMLDialogElement>(null),
+    [data, setData] = useState<(Applicant & { results: Result[] }) | null>(
+      null,
+    ),
+    [error, setError] = useState("");
+  useEffect(() => {
+    const element = dialog.current!,
+      previous = document.activeElement as HTMLElement;
+    element.showModal();
+    return () => {
+      element.close();
+      previous?.focus();
+    };
+  }, []);
+  useEffect(() => {
+    const c = new AbortController();
+    void request<Applicant & { results: Result[] }>(
+      `/api/runs/${runId}/applicant?user_id=${encodeURIComponent(userId)}`,
+      { signal: c.signal },
+    )
+      .then((d) => {
+        if (!c.signal.aborted) setData(d);
+      })
+      .catch((e) => {
+        if (!c.signal.aborted) setError((e as Error).message);
+      });
+    return () => c.abort();
+  }, [request, runId, userId]);
+  return (
+    <dialog
+      ref={dialog}
+      className="drawer"
+      aria-labelledby="applicant-title"
+      onCancel={(e) => {
+        e.preventDefault();
+        close();
+      }}
+      onClick={(e) => {
+        if (e.target === dialog.current) close();
+      }}
+    >
+      <div className="drawer-content">
+        <div className="section-title">
+          <div>
+            <p className="eyebrow">APPLICANT DECISIONS</p>
+            <h2 id="applicant-title">{userId}</h2>
+          </div>
+          <button
+            autoFocus
+            className="icon-button"
+            onClick={close}
+            aria-label="Close applicant details"
+          >
+            <X />
+          </button>
+        </div>
+        {error && (
+          <p className="alert" role="alert">
+            {error}
+          </p>
+        )}
+        {!data && !error && <p role="status">Loading lender decisions…</p>}
+        {data && (
+          <>
+            <div className="drawer-summary">
+              <Status value={data.status} />
+              <span>{data.results.length} lender decisions saved</span>
+            </div>
+            {data.status === "processing" && (
+              <p className="notice">
+                Some lender checks are still processing. Close and reopen to
+                refresh these decisions.
+              </p>
+            )}
+            {data.results.map((result) => (
+              <article className="decision-card" key={result.result_id}>
+                <div className="section-title">
+                  <div>
+                    <h3>{result.lender}</h3>
+                    <p>{result.product_name}</p>
+                  </div>
+                  <Status value={result.decision} />
+                </div>
+                {result.advertised_rate && (
+                  <p className="rate">
+                    Advertised rate: {result.advertised_rate}
+                  </p>
+                )}
+                <div className="reasons">
+                  {result.reasons.map((reason, i) => (
+                    <div key={i}>
+                      <div>
+                        <strong>{reason.criterion.replaceAll("_", " ")}</strong>
+                        <span className={`reason-status ${reason.status}`}>
+                          {reason.status}
+                        </span>
+                      </div>
+                      <p>
+                        {reason.message}
+                        {reason.observed_value !== undefined &&
+                          ` Observed: ${reason.observed_value}.`}
+                        {reason.required_value &&
+                          ` Required: ${reason.required_value}.`}
+                        {reason.minimum !== undefined &&
+                          ` Minimum: ${reason.minimum}${reason.currency ? ` ${reason.currency}` : ""}.`}
+                        {reason.maximum !== undefined &&
+                          ` Maximum: ${reason.maximum}.`}
+                        {reason.preferred_minimum !== undefined &&
+                          ` Preferred minimum: ${reason.preferred_minimum}.`}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                <a href={result.source_url} target="_blank" rel="noreferrer">
+                  View official source
+                  <ArrowRight size={14} />
+                </a>
+                <details className="audit">
+                  <summary>Policy and audit details</summary>
+                  <dl>
+                    <dt>Policy snapshot</dt>
+                    <dd>{result.snapshot_id}</dd>
+                    <dt>Rule version</dt>
+                    <dd>{result.rule_version}</dd>
+                    <dt>Source observed</dt>
+                    <dd>{date(result.observed_at)}</dd>
+                  </dl>
+                </details>
+              </article>
+            ))}
+            {!data.results.length && (
+              <p>No lender decisions have been saved yet.</p>
+            )}
+          </>
+        )}
+      </div>
+    </dialog>
+  );
+}
+function Policies() {
+  const { dashboard, pending, request, refresh } = useWorkspace(),
+    [busy, setBusy] = useState(""),
+    [message, setMessage] = useState("");
+  return (
+    <>
+      <Heading title="Policies">
+        Review the lender criteria used for new applicant analyses.
+      </Heading>
+      {message && (
+        <p className="notice" role="status">
+          {message}
+        </p>
+      )}
+      <div className="section-title">
+        <div>
+          <h2>Active catalogue</h2>
+          <p>Each analysis keeps the policy versions active when it starts.</p>
+        </div>
+        <span className="count">
+          {dashboard?.products.length || 0} products
+        </span>
+      </div>
+      <section className="policy-grid">
+        {dashboard?.products.map((p) => (
+          <article className="panel policy-card" key={p.product_id}>
+            <div className="lender-icon">
+              <Banknote size={22} />
+            </div>
+            <h3>{p.lender}</h3>
+            <p>{p.product_name}</p>
+            <div className="rate">
+              <span>Advertised rate</span>
+              <strong>
+                {p.advertised_rate || "Not published in this source"}
+              </strong>
+            </div>
+            <p className="small muted">
+              {p.extraction_status === "approved"
+                ? `Approved source${p.observed_at ? ` · observed ${date(p.observed_at)}` : ""}`
+                : "Source requires review"}
+            </p>
+            <a href={p.product_url} target="_blank" rel="noreferrer">
+              Official eligibility source
+              <ArrowRight size={14} />
+            </a>
+          </article>
+        ))}
+      </section>
+      <div className="section-title policy-review-title">
+        <div>
+          <h2>Changes awaiting approval</h2>
+          <p>
+            Review the source and proposed criteria before applying a new policy
+            to future analyses.
+          </p>
+        </div>
+        <span className="count">{pending.length} pending</span>
+      </div>
+      {pending.length ? (
+        pending.map((p) => (
+          <article className="panel pending-policy" key={p.snapshot_id}>
+            <div className="section-title">
+              <div>
+                <h3>
+                  {p.lender} · {p.product_name}
+                </h3>
+                <p>Source observed {date(p.observed_at)}</p>
+              </div>
+              <span className="status review">Needs approval</span>
+            </div>
+            {p.advertised_rate && (
+              <p className="rate">Advertised rate: {p.advertised_rate}</p>
+            )}
+            <dl className="policy-rules">
+              {Object.entries(p.rules)
+                .filter(
+                  ([key]) =>
+                    !["version", "incomplete_eligibility"].includes(key),
+                )
+                .map(([key, rule]) => (
+                  <div key={key}>
+                    <dt>{key.replaceAll("_", " ")}</dt>
+                    <dd>
+                      {rule.kind === "unknown"
+                        ? "Not specified — requires review"
+                        : `${rule.status || rule.min || ""}${rule.max ? `–${rule.max}` : ""}${rule.currency ? ` ${rule.currency}` : ""}${rule.kind === "preferred" ? " preferred" : ""}${rule.location_dependent ? " · varies by location" : ""}`}
+                    </dd>
+                  </div>
+                ))}
+            </dl>
+            <details className="source">
+              <summary>Review source evidence</summary>
+              {p.rate_source_quote && (
+                <blockquote>{p.rate_source_quote}</blockquote>
+              )}
+              <pre>{p.source_excerpt}</pre>
+              <a href={p.source_url} target="_blank" rel="noreferrer">
+                Open official source
+                <ArrowRight size={14} />
+              </a>
+              {p.reviewer_note && (
+                <details className="audit">
+                  <summary>Extraction notes</summary>
+                  <p>{p.reviewer_note}</p>
+                </details>
+              )}
+            </details>
+            <div className="approval">
+              <p>Approval applies to future analyses.</p>
+              <button
+                className="button primary"
+                disabled={!!busy}
+                onClick={async () => {
+                  setBusy(p.snapshot_id);
+                  setMessage("");
+                  try {
+                    await request(`/api/policies/${p.snapshot_id}/approve`, {
+                      method: "POST",
+                      body: "{}",
+                    });
+                    setMessage(
+                      `${p.lender} policy approved. New analyses will use this version.`,
+                    );
+                    await refresh();
+                  } catch (e) {
+                    setMessage((e as Error).message);
+                  } finally {
+                    setBusy("");
+                  }
+                }}
+              >
+                {busy === p.snapshot_id ? "Approving…" : "Approve criteria"}
+                <Check size={16} />
+              </button>
+            </div>
+          </article>
+        ))
+      ) : (
+        <div className="panel empty">
+          <ShieldCheck />
+          <h3>No policy changes awaiting approval</h3>
+          <p>New source changes will appear here for your review.</p>
+        </div>
+      )}
+    </>
+  );
+}
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Provider>
+        <Shell />
+      </Provider>
+    </BrowserRouter>
+  );
 }
