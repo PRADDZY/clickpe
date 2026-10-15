@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from app.config import get_settings
 from app.database import connection
 
 REQUIRED_COLUMNS = (
@@ -124,8 +125,8 @@ def import_upload(upload_id: str, object_key: str, filename: str, path: Path) ->
                     existing["duplicate_email_count"],
                 )
             cur.execute(
-                "INSERT INTO run (run_id, upload_id, status, row_count, distinct_users, cursor_user_id) VALUES (%s,%s,'queued',%s,%s,'')",
-                (run_id, upload_id, row_count, row_count),
+                "INSERT INTO run (run_id, upload_id, status, row_count, distinct_users, cursor_user_id, notification_mode) VALUES (%s,%s,'queued',%s,%s,'',%s)",
+                (run_id, upload_id, row_count, row_count, get_settings().notification_mode),
             )
             cur.executemany(
                 "INSERT INTO batch_user (run_id,user_id,name,email,monthly_income,credit_score,employment_status,age) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",

@@ -11,7 +11,17 @@ import pytest
 from psycopg.rows import dict_row
 
 from app import database, relay
-from app.api.notifications import DeliveryReceipt, prepare_notifications, record_receipt
+from app.api.notifications import (
+    ClaimBatch,
+    DeliveryClaim,
+    DeliveryFailure,
+    DeliveryReceipt,
+    begin_delivery,
+    claim_notifications,
+    prepare_notifications,
+    record_failure,
+    record_receipt,
+)
 from app.api.routes import (
     NextBatchRequest,
     PersistBatchRequest,
@@ -168,22 +178,89 @@ def test_policy_proposal_binds_audit_strings(db):
 
 
 def test_test_delivery_uses_controlled_destination_and_claims_once(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(get_settings(), "notification_mode", "test")
+    monkeypatch.setattr(get_settings(), "test_recipients", "operator@controlled.invalid")
+    monkeypatch.setattr(get_settings(), "ses_sender", "sender@controlled.invalid")
+    run = imported_run(tmp_path, 3)
+    save_match_batch(evaluate(next_match_batch(NextBatchRequest(run_id=run.run_id))))
+    prepared = prepare_notifications(run.run_id)
+    assert prepared["delivery_enabled"] is True
+    assert prepared["prepared_applicants"] == 3
+    assert prepare_notifications(run.run_id)["prepared_applicants"] == 3
+    claims = claim_notifications(ClaimBatch())["deliveries"]
+    assert len(claims) == 3
+    assert claim_notifications(ClaimBatch())["deliveries"] == []
+    assert "fixture@example.invalid" not in json.dumps(claims)
+    for claim in claims:
+        assert claim["products"][0]["lender"] == "Axis Bank"
+        # Advance the fake rate gate without sleeping or contacting SES.
+        with database.connection() as conn:
+            conn.execute("UPDATE notification_send_gate SET next_send_at=now()-interval '1 second'")
+        started = begin_delivery(uuid.UUID(claim["delivery_id"]), DeliveryClaim(**claim))
+        assert started["recipient"] == "operator@controlled.invalid"
+        assert started["delivery_enabled"] is True
+        assert (
+            begin_delivery(uuid.UUID(claim["delivery_id"]), DeliveryClaim(**claim))[
+                "delivery_enabled"
+            ]
+            is False
+        )
+        receipt = DeliveryReceipt(**claim, message_id="synthetic-ses-" + claim["delivery_id"])
+        assert record_receipt(receipt)["status"] == "sent"
+        assert record_receipt(receipt)["status"] == "sent"
+
+
+def test_preview_mode_is_frozen_before_enabling_test_delivery(db, tmp_path, monkeypatch):
     run = imported_run(tmp_path, 2)
     save_match_batch(evaluate(next_match_batch(NextBatchRequest(run_id=run.run_id))))
     monkeypatch.setattr(get_settings(), "notification_mode", "test")
     monkeypatch.setattr(get_settings(), "test_recipients", "operator@controlled.invalid")
     monkeypatch.setattr(get_settings(), "ses_sender", "sender@controlled.invalid")
-    prepared = prepare_notifications(run.run_id)
-    assert prepared["delivery_enabled"] is True
-    assert prepared["recipient"] == "operator@controlled.invalid"
-    assert "fixture@example.invalid" not in json.dumps(prepared)
-    assert "Axis Bank" in prepared["body"]
     assert prepare_notifications(run.run_id)["delivery_enabled"] is False
-    receipt = DeliveryReceipt(
-        delivery_id=prepared["delivery_id"], message_id="synthetic-ses-receipt"
+    assert claim_notifications(ClaimBatch())["deliveries"] == []
+
+
+def test_missing_receipt_is_uncertain_and_never_automatically_resent(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(get_settings(), "notification_mode", "test")
+    monkeypatch.setattr(get_settings(), "test_recipients", "operator@controlled.invalid")
+    monkeypatch.setattr(get_settings(), "ses_sender", "sender@controlled.invalid")
+    run = imported_run(tmp_path, 1)
+    save_match_batch(evaluate(next_match_batch(NextBatchRequest(run_id=run.run_id))))
+    prepare_notifications(run.run_id)
+    claim = claim_notifications(ClaimBatch())["deliveries"][0]
+    delivery_id = uuid.UUID(claim["delivery_id"])
+    assert begin_delivery(delivery_id, DeliveryClaim(**claim))["delivery_enabled"]
+    with database.connection() as conn:
+        conn.execute("UPDATE notification_delivery SET lease_until=now()-interval '1 minute'")
+    assert claim_notifications(ClaimBatch())["deliveries"] == []
+    assert database.one_row("SELECT status FROM notification_delivery")["status"] == "uncertain"
+    assert record_receipt(DeliveryReceipt(**claim, message_id="late-receipt"))["status"] == "sent"
+
+
+def test_delivery_gate_enforces_aliases_caps_and_definitive_failure(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(get_settings(), "notification_mode", "test")
+    monkeypatch.setattr(get_settings(), "notification_run_limit", 1)
+    monkeypatch.setattr(get_settings(), "test_recipients", "operator@controlled.invalid")
+    monkeypatch.setattr(get_settings(), "ses_sender", "sender@controlled.invalid")
+    run = imported_run(tmp_path, 3)
+    save_match_batch(evaluate(next_match_batch(NextBatchRequest(run_id=run.run_id))))
+    prepare_notifications(run.run_id)
+    first, second, third = claim_notifications(ClaimBatch())["deliveries"]
+    assert begin_delivery(uuid.UUID(first["delivery_id"]), DeliveryClaim(**first))[
+        "delivery_enabled"
+    ]
+    result = begin_delivery(uuid.UUID(second["delivery_id"]), DeliveryClaim(**second))
+    assert result["reason"] == "run_limit"
+    assert (
+        record_failure(
+            uuid.UUID(first["delivery_id"]),
+            DeliveryFailure(**first, outcome="rejected", error_code="throttled"),
+        )["status"]
+        == "ready"
     )
-    assert record_receipt(receipt)["status"] == "sent"
-    assert record_receipt(receipt)["status"] == "sent"
+    monkeypatch.setattr(get_settings(), "test_recipients", "changed@controlled.invalid")
+    result = begin_delivery(uuid.UUID(third["delivery_id"]), DeliveryClaim(**third))
+    assert result["reason"] == "recipient_not_allowed"
 
 
 def test_import_database_errors_remain_retryable(tmp_path, monkeypatch):
