@@ -8,19 +8,19 @@ Show the README diagram. Explain S3 - SQS - Python Lambda - RDS for bulk import,
 
 ## 1:00-2:15 - n8n discovery workflow
 
-Show the schedule, the two official product sources, source-excerpt extraction, changed-source check, structured extraction and provider fallback, and the pending-review API. Show source-backed rate metadata when available. Explain how untrusted page content is treated and why operator approval is required. Demonstrate this only after provider credentials are configured and an execution succeeds; identify any remaining limitation honestly.
+Open Policies, then show the daily India-time schedule, two official product sources, source excerpts, changed-source check, structured extraction and provider fallback, and the pending-review API. Show source-backed rates after a successful extraction. Explain untrusted page content and operator approval. Provider credentials remain a prerequisite; do not imply curated baseline data came from a live model execution.
 
 ## 2:15-4:00 - Upload and matching
 
-Upload `users.csv`. Show visible import/matching progress. Open Workflow B and walk through the authenticated webhook, Postgres page query, JavaScript rule evaluation, and persistence callback. Explain that the page size adapts to product count and never exceeds 400 decisions. Show a completed run with 10,000 profiles and its total decisions.
+On Overview upload `users.csv` in preview mode. Show byte upload progress, import activity and saved matching decisions. Navigate to Applicants while processing continues. Open Workflow B: authenticated webhook, bounded Postgres hard-rule screen, candidate JavaScript evaluation, and persistence callback. Explain the 400-decision page bound. Show a completed run with 10,000 profiles and measured SQL rejection/candidate counts.
 
 ## 4:00-5:15 - Explanations and policy versions
 
-Filter eligible, ineligible, and review decisions. Open the evidence dialog: observed value, required threshold, rule version, pinned snapshot, and official source. Browse the next page. Explain preferred versus required criteria and missing eligibility data. Show a pending proposal and explain why approval changes future runs.
+Filter matched, no-match and needs-review applicants. Show one row per profile and open its decision drawer: every lender, observed values, thresholds, pinned evidence and official sources. Use numbered pagination and page size. Explain preferred versus required criteria and missing data. On Policies show a pending proposal and explain why approval affects future runs.
 
 ## 5:15-6:30 - SES test delivery
 
-Show Workflow C's preview preparation, controlled-recipient gate, SES node, and receipt callback. Show the personalized email received in your controlled inbox and its matched product list, masking the address. Explain that all CSV addresses are replaced by the allowlisted test destination and that only one sample email is sent per run. Do not claim this section is complete while delivery is disabled.
+Use a separate small completed run with three eligible applicants. Show Workflow C's per-applicant bundles, leased claims, pacing, send gate, personalized message, SES node, receipt callback and minute schedule. Show all three received messages with matched products and masked addresses. Explain that destinations come only from the verified allowlist. This section is deferred until SES verification; do not claim completion while delivery is disabled.
 
 ## 6:30-7:45 - Reliability and optimization
 

@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -94,11 +95,13 @@ def test_staged_screen_preserves_decisions_and_all_findings(db, tmp_path):
     )
     baseline = json.loads(output.stdout)["results"]
     staged = evaluate(page)
+
     def normalize(rows):
         return sorted(
             [{k: v for k, v in row.items() if k != "rule_version"} for row in rows],
             key=lambda r: (r["user_id"], r["product_id"]),
         )
+
     assert normalize([r.model_dump() for r in staged.results]) == normalize(baseline)
     for user in baseline_page["users"]:
         for product in products:
@@ -118,3 +121,16 @@ def test_staged_screen_preserves_decisions_and_all_findings(db, tmp_path):
     )
     assert metrics["prefiltered_count"] == page["prefiltered_count"]
     assert metrics["candidate_count"] == page["candidate_count"]
+
+
+def test_synthetic_benchmark_preserves_existing_catalogue(db):
+    from scripts.benchmark_matching import benchmark
+
+    report = benchmark(os.environ["TEST_DATABASE_URL"], applicants=40, products=5)
+    assert report["evaluated_pairs"] == report["expected_pairs"] == 200
+    assert report["parity"] is True
+    assert report["candidate_pairs"] + report["sql_prefiltered_pairs"] == 200
+    assert report["max_decisions_per_batch"] <= 400
+    assert report["persisted_results"] is False
+    assert database.one_row("SELECT COUNT(*) AS n FROM product WHERE active")["n"] == 2
+    assert database.one_row("SELECT COUNT(*) AS n FROM eligibility_result")["n"] == 0

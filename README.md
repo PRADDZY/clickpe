@@ -5,8 +5,8 @@ An explainable loan-product screening prototype for the ClickPe engineering-inte
 ## What is included
 
 - **FastAPI and PostgreSQL** for bounded CSV ingestion, applicant records, source snapshots, decisions, event delivery, policy approvals and audit history.
-- **React and TypeScript** operations console for importing a file, following a run, inspecting the rule explanation, reviewing policy changes and previewing notifications.
-- **Three n8n workflows** for daily official-page discovery, paged applicant matching, and deduplicated notification previews with an optional controlled SES test delivery. Matching is a fixed, versioned rules evaluator in a JavaScript Code node, not an LLM decision.
+- **React and TypeScript** workspace with separate Overview, Applicants and Policies pages, real upload progress, persisted processing tracking, grouped applicant results and numbered pagination.
+- **Three n8n workflows** for daily official-page discovery, staged SQL/JavaScript applicant matching, and per-applicant personalized notification delivery. Matching uses versioned structured rules; there are zero model calls per applicant-product pair.
 - **AWS infrastructure** for the API, S3 direct uploads, SQS and a DLQ, Lambda ingestion, private RDS PostgreSQL, retention, a private n8n host, and an HTTPS console served from the API Gateway origin. PostgreSQL and n8n have no public inbound port.
 - **Docker Compose** for a local stack with the same n8n workflows and API.
 - **GitHub Actions** for backend checks and a production TypeScript build.
@@ -25,13 +25,13 @@ flowchart LR
   OUT --> REL[Python relay on n8n host]
   REL --> MATCH[n8n matching workflow]
   MATCH -->|Postgres: <=200 profiles, <=400 decisions| DB
-  MATCH -->|Code node: rules + reasons| API
+  MATCH -->|SQL hard-rule screen; Code candidate rules| API
   API --> DB
   DISC[n8n policy discovery] -->|official lender pages| SRC[OpenRouter; Google fallback]
   DISC -->|pending snapshot| DB
   OP[Operator source review] --> DB
   API -->|completed run outbox event| PRE[n8n notification workflow]
-  PRE -->|prepare preview and claim test delivery| API
+  PRE -->|prepare each applicant; lease, send gate, receipt| API
   PRE -->|only with configured test inbox| SES[AWS SES node]
 ```
 
@@ -43,9 +43,9 @@ flowchart LR
 - Uploads are size-limited to 25 MiB, the CSV schema and row values are checked, the raw cloud object is deleted after import, and abandoned S3 objects expire after one day. Applicant rows and per-person results are deleted after seven days.
 - Workflow deliveries use a transactional outbox, deterministic page cursors and unique keys. A retried SQS delivery or n8n callback does not create duplicate results or pages.
 - Execution input and output data are not saved in n8n. Error messages and operational audit records omit applicant values.
-- Notifications default to **preview**. Workflow C includes an SES node behind a server-controlled gate: `NOTIFICATION_MODE=test`, one `TEST_RECIPIENTS` address, and `SES_SENDER` must be configured. The destination always comes from this allowlist, never from a CSV row. The current hosted demo has no test inbox configured, so delivery remains disabled.
+- Notifications default to **preview**, captured when each run is imported. Workflow C requires `NOTIFICATION_MODE=test`, verified `TEST_RECIPIENTS`, and `SES_SENDER`. Destinations come from this explicit allowlist, never from a CSV row. Enabling test mode does not send historical preview runs. The user has deferred inbox verification, so live delivery remains disabled.
 - Every run pins its approved product snapshots at import. New approvals affect future runs only. Pages hold at most 200 applicants and 400 applicant-product decisions; the persistence endpoint checks the complete expected page before advancing the cursor.
-- A test delivery claims at most one eligible applicant per run and lists all of that applicant's matched products. The SES node does not retry sends: an ambiguous send outcome requires checking SES and `test_delivery` before a manual resend, avoiding automatic duplicate messages.
+- Each matched applicant has one delivery ledger entry per run and one email listing all matched products. Five applicants are claimed at a time, with an atomic send gate, two-second workflow pacing, a default three-email run cap and a conservative daily budget. Deferred work stays visible. The SES node does not retry sends; missing receipts become uncertain and are excluded from automatic recovery.
 
 ## Lender source baseline
 
@@ -91,6 +91,8 @@ Open [http://localhost:5678](http://localhost:5678), create the n8n owner accoun
 4. **Google Gemini**: Header Auth with name `x-goog-api-key` and the separate Gemini API key.
 
 Activate the three imported workflows. Workflow 1 checks lender sources daily. Workflows 2 and 3 are authenticated webhooks invoked from the transactional outbox. Source proposals remain pending until you approve them in the console.
+
+Workflow 1 explicitly uses `Asia/Kolkata`; unchanged source excerpts skip model extraction. Workflow 3 also checks pending deliveries every minute, so expired pre-send claims can recover after an interrupted execution.
 
 For local static analysis and tests:
 
@@ -145,7 +147,9 @@ See [docs/demo-script.md](docs/demo-script.md) for a short screen-recording plan
 
 - `app/api/routes.py`: operator API, policy-review gates, workflow handoffs and notification previews.
 - `app/csv_ingestion.py`: bounded CSV validation, idempotent import and outbox event.
-- `app/eligibility.py`: versioned deterministic evaluator and review fallbacks.
+- `app/eligibility.py`: Python reference evaluator for correctness comparisons; production matching runs in n8n's Postgres and Code nodes.
+- `app/matching.py`: bounded SQL contract shared with the exported n8n Postgres node.
+- `app/api/workspace.py`: grouped applicant results, progress and history endpoints.
 - `migrations/`: product snapshots, applicant data, results, outbox, notification events and audit records.
 - `n8n/workflows/`: the three credential-free workflow exports.
 - `serverless.yml`: AWS stack, private networking and function-level permissions.
@@ -153,13 +157,29 @@ See [docs/demo-script.md](docs/demo-script.md) for a short screen-recording plan
 
 ## Controlled SES demonstration
 
-A received email is required by the assignment. This remains a submission blocker until an inbox you control is available. An alias is optional; a normal inbox is sufficient.
+A received email is required by the assignment. The user has deferred the inbox configuration. Do not represent the email demonstration as complete until real messages have been received.
 
-1. Verify the sender and, while SES is in the sandbox, the controlled recipient in `ap-south-1`. Complete verification from your inbox yourself.
-2. Configure an AWS credential on Workflow C's SES node with only the required SES sending permissions, scoped to the verified sender and destination. Enable that node if the deployed preview configuration disabled it.
-3. Set `NOTIFICATION_MODE=test`, `TEST_RECIPIENTS=<one controlled inbox>`, and `SES_SENDER=<verified sender>` in the host's private `.env`. Restart the API so it loads the settings. Keep credentials and addresses out of Git and the recording.
-4. Complete a new run. Workflow C prepares previews, selects one eligible applicant, substitutes the controlled destination, sends through SES, and records the SES MessageId. With no eligible applicant, it records the preview without sending.
-5. Show the received email and its matched product list in the recording. Restore `NOTIFICATION_MODE=preview` after the demonstration. Do not manually rerun an ambiguous delivery without inspecting its claim and SES receipt.
+1. Verify an owned sender and two explicit inbox aliases in SES `ap-south-1`. Complete confirmation links yourself. Sandbox recipients must be verified individually unless covered by a verified domain. [SES sandbox rules](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html).
+2. Set `NOTIFICATION_MODE=test`, `TEST_RECIPIENTS=alias-a@owned-domain,alias-b@owned-domain`, and `SES_SENDER=verified@owned-domain` in the private local environment, then deploy with `scripts/Publish-Web.ps1`. Keep addresses lowercase and comma separated. Deployment resolves settings once and synchronizes the Lambda import mode, IAM restrictions and host configuration.
+3. Deployment binds `clickpe-ses` as an AWS Assume Role credential. EC2 IMDSv2 supplies renewable source credentials; the dedicated role permits only `ses:SendEmail` from the configured identity to configured destinations. The external ID is read from Secrets Manager. No IAM user keys are needed. [n8n system credentials](https://docs.n8n.io/integrations/builtin/credentials/aws/).
+4. Upload a small synthetic file with exactly three eligible applicants. Every matched applicant gets one personalized email with all matched products; inspect all three receipts and received messages. A profile with no matches gets no email. Show the inbox in the recording with addresses masked.
+5. Restore preview mode and redeploy before using the supplied 10,000-row file. Test mode defaults to three messages per run and a 180-message rolling daily budget, below the sandbox's 200-message quota; account usage outside this application still counts against AWS limits.
+
+The stock n8n SES node discards detailed AWS error codes on its error output. Recognizable HTTP 429 errors receive bounded retry; generic HTTP 400/403 rejections require explicit recovery after correcting the cause. Transport ambiguity stays `uncertain`. The internal `POST /internal/v1/resume-notifications/{run_id}` operation requeues only deferred or definitively failed test deliveries; it never requeues sent, sending, uncertain or preview entries. Check SES before resolving an uncertain outcome. Legacy `test_delivery` receipts are retained for audit.
+
+## Workspace behavior
+
+The Overview page shows **Upload / Import / Match / Ready**. Transfer percentage comes from browser byte events; 100% transfer waits for storage confirmation. Import is indeterminate. Matching percentage comes from persisted decisions against pinned products. Confirmed jobs continue across route changes and resume after refresh; unfinished file transfers require selecting the file again.
+
+Applicants are grouped once per profile: any eligible product means **Matched**; otherwise any review decision means **Needs review**; all failed decisions mean **No matches**. Incomplete profiles remain **Processing**. The 25/50/100 pagination controls, filters and selected run are reflected in the URL. Drawer details retain every product's outcome and source evidence. Summary counts describe applicants; per-product decisions remain available through the original results API.
+
+## Staged matching and schema mapping
+
+The assignment's product catalogue is represented by `product` plus immutable `policy_snapshot` rows; `run_policy` pins the snapshots used by an import. Successful matches are `eligibility_result` rows with `decision='eligible'`. This normalized design preserves source versions and stores rejected/review decisions alongside matches for audit.
+
+The n8n Postgres node screens confirmed mandatory employment, age, location-independent income and credit-score rules. Rejected pairs receive complete ordered findings directly from SQL; only survivors enter the JavaScript evaluator for advisory and unknown criteria. All pairs are persisted, and a page still contains at most 400 decisions. Server-computed candidate/rejection counters are updated only once per accepted cursor.
+
+This reduces candidate work in the JavaScript stage, not the asymptotic applicant-product comparisons performed by SQL. Report measured throughput and candidate reduction, not an invented complexity improvement. The parity fixture compares every decision and ordered finding against the frozen previous n8n implementation, including fractional thresholds, preferred criteria and unknown/location-dependent terms. `rules-v2-staged` identifies the new execution strategy.
 
 ## Validation and submission
 
