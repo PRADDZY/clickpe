@@ -14,6 +14,7 @@
   "overrides": {
     "tar": "7.5.22",
     "adm-zip": "0.6.1",
-    "simple-git": "4.0.2"
+    "simple-git": "3.36.0",
+    "@simple-git/argv-parser": "2.0.1"
   }
 }
