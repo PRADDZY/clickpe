@@ -23,6 +23,10 @@ requirements.txt
 .aws-build/
 *.zip
 demo-recording.*
+certs/
+.runtime/
+output/playwright/
+.playwright-cli/
 users.csv
 *.csv
 *.docx

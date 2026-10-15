@@ -72,10 +72,12 @@ services:
       EXECUTIONS_DATA_MAX_AGE: "168"
       N8N_CONCURRENCY_PRODUCTION_LIMIT: "2"
       N8N_METRICS: "true"
+      NODE_EXTRA_CA_CERTS: /certs/rds-ca.pem
     ports: ["127.0.0.1:5678:5678"]
     volumes:
       - n8n_data:/home/node/.n8n
       - ./n8n/workflows:/seed/workflows:ro
+      - ./certs:/certs:ro
     depends_on:
       api: {condition: service_healthy}
     networks: [internal]
