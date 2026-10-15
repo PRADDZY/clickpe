@@ -96,7 +96,7 @@ select {
   max-width: 100%;
 }
 label {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 550;
   display: flex;
   flex-direction: column;
@@ -205,7 +205,7 @@ svg {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 13px;
+  font-size: 14px;
 }
 .topbar .muted {
   margin: 0 13px;
@@ -236,7 +236,7 @@ svg {
   box-shadow: 0 2px 3px #172c4e03;
 }
 .metric span {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--muted);
 }
@@ -265,14 +265,14 @@ svg {
 }
 .section-title p {
   margin-top: 5px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .section-title a {
   display: inline-flex;
   align-items: center;
   gap: 7px;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 550;
 }
 .panel > .section-title {
@@ -283,7 +283,7 @@ svg {
   align-items: center;
   justify-content: center;
   gap: 9px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   border-radius: 7px;
   padding: 10px 15px;
@@ -354,7 +354,7 @@ svg {
   color: #2a415f;
 }
 .dropzone span {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--muted);
 }
 .dropzone:not(:disabled):hover,
@@ -363,7 +363,7 @@ svg {
   border-color: var(--blue);
 }
 .csv-help {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--muted);
   margin-top: 18px;
 }
@@ -390,7 +390,7 @@ svg {
   align-items: center;
   gap: 8px;
   margin-top: 22px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
 }
 .steps {
@@ -406,7 +406,7 @@ svg {
   align-items: center;
   gap: 8px;
   color: #778396;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
   position: relative;
 }
@@ -485,7 +485,7 @@ table {
   border-collapse: collapse;
   text-align: left;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: 14px;
 }
 th {
   background: #fafbfd;
@@ -512,7 +512,7 @@ tbody tr:hover {
   gap: 7px;
   color: #2860bd;
   font-weight: 550;
-  font-size: 12px;
+  font-size: 14px;
   background: transparent;
   border: 0;
   padding: 4px;
@@ -523,7 +523,7 @@ tbody tr:hover {
   gap: 6px;
   padding: 4px 9px;
   border-radius: 5px;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 600;
   white-space: nowrap;
   background: #edf1f5;
@@ -576,7 +576,7 @@ tbody tr:hover {
 }
 .empty p {
   max-width: 480px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .empty .button {
   margin-top: 8px;
@@ -598,7 +598,7 @@ tbody tr:hover {
   align-items: center;
   gap: 13px;
   margin-bottom: 22px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .alert {
   background: #fff3f1;
@@ -620,7 +620,7 @@ tbody tr:hover {
   border: 1px solid #d7e4fa;
   border-radius: 7px;
   margin-bottom: 24px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .run-picker {
   padding: 22px 25px;
@@ -667,7 +667,7 @@ tbody tr:hover {
   white-space: normal;
 }
 .chips > span:not(.muted) {
-  font-size: 11px;
+  font-size: 14px;
   background: #f0f5fc;
   border: 1px solid #e0e9f6;
   color: #355b8b;
@@ -692,7 +692,7 @@ tbody tr:hover {
   gap: 16px;
   align-items: center;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--muted);
 }
 .pagination-summary {
@@ -706,13 +706,13 @@ tbody tr:hover {
   display: flex;
   flex-direction: row;
   align-items: center;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 400;
 }
 .pagination select {
   padding: 5px 7px;
   min-height: 32px;
-  font-size: 12px;
+  font-size: 14px;
 }
 .pagination nav {
   display: flex;
@@ -723,7 +723,7 @@ tbody tr:hover {
   min-height: 32px;
   min-width: 32px;
   padding: 5px 8px;
-  font-size: 12px;
+  font-size: 14px;
   vertical-align: middle;
   display: inline-flex;
   align-items: center;
@@ -744,7 +744,7 @@ tbody tr:hover {
   gap: 8px;
 }
 .page-jump label {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 400;
 }
 .page-jump input {
@@ -763,7 +763,7 @@ tbody tr:hover {
   font-size: 16px;
 }
 .notification p {
-  font-size: 13px;
+  font-size: 14px;
   margin-top: 4px;
 }
 .notification-summary {
@@ -797,14 +797,14 @@ tbody tr:hover {
 }
 .policy-card > p {
   margin-top: 4px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .rate {
   background: #f6f8fc;
   border-radius: 7px;
   padding: 13px 15px;
   margin-top: 18px;
-  font-size: 13px;
+  font-size: 14px;
   color: #344a6b;
 }
 .rate > span {
@@ -854,18 +854,18 @@ tbody tr:hover {
 }
 .policy-rules dt {
   text-transform: capitalize;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--muted);
 }
 .policy-rules dd {
-  font-size: 13px;
+  font-size: 14px;
   margin: 6px 0 0;
   font-weight: 500;
 }
 .source {
   border-top: 1px solid var(--border);
   padding-top: 17px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .source pre {
   white-space: pre-wrap;
@@ -895,7 +895,7 @@ tbody tr:hover {
   padding-top: 20px;
 }
 .approval p {
-  font-size: 12px;
+  font-size: 14px;
 }
 .drawer {
   position: fixed;
@@ -969,11 +969,11 @@ tbody tr:hover {
 }
 .reasons strong {
   text-transform: capitalize;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 550;
 }
 .reasons p {
-  font-size: 12px;
+  font-size: 14px;
   margin-top: 6px;
 }
 .reason-status {
@@ -1159,7 +1159,7 @@ footer {
   }
   .sidebar nav a {
     padding: 9px 10px;
-    font-size: 12px;
+    font-size: 14px;
     gap: 6px;
   }
   .sidebar nav a svg {
@@ -1221,7 +1221,7 @@ footer {
     justify-content: space-between;
   }
   .steps li {
-    font-size: 11px;
+    font-size: 14px;
     gap: 5px;
   }
   .steps li span {
@@ -1237,7 +1237,7 @@ footer {
   }
   .inline select {
     flex-basis: 100%;
-    font-size: 12px;
+    font-size: 14px;
   }
   .filters {
     grid-template-columns: 1fr;
@@ -1330,5 +1330,32 @@ footer {
     background: transparent;
     color: #d3dff0;
     border: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .sidebar {
+    flex-wrap: wrap;
+    gap: 9px;
+  }
+  .sidebar nav {
+    width: 100%;
+    margin: 0;
+    justify-content: space-between;
+  }
+  .sidebar nav a {
+    flex: 1;
+    justify-content: center;
+    font-size: 14px;
+    padding: 10px 8px;
+  }
+  .inline select {
+    font-size: 14px;
+  }
+  .pagination nav button {
+    min-width: 32px;
+  }
+  .notification-summary {
+    font-size: 14px;
   }
 }
