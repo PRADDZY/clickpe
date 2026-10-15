@@ -1,5 +1,6 @@
 import contextlib
 import json
+import logging
 import tempfile
 from pathlib import Path
 from urllib.parse import unquote_plus
@@ -13,6 +14,7 @@ from app.csv_ingestion import import_upload as ingest_file
 from app.database import connection
 from app.main import app
 
+logger = logging.getLogger(__name__)
 api = Mangum(app, lifespan="off")
 
 
@@ -54,6 +56,16 @@ def ingest_queue(event: dict, _context: object) -> dict:
                 ingest_file(str(upload["upload_id"]), key, upload["filename"], temp_path)
                 s3.delete_object(Bucket=settings.s3_upload_bucket, Key=key)
         except ImportErrorCode as exc:
+            cause = exc.__cause__
+            diagnostic = getattr(cause, "diag", None)
+            logger.warning(
+                "Upload import failed upload_id=%s error_code=%s cause_type=%s sqlstate=%s constraint=%s",
+                upload.get("upload_id", "unknown") if upload else "unknown",
+                exc.code,
+                type(cause).__name__ if cause else "none",
+                getattr(cause, "sqlstate", None) or "none",
+                getattr(diagnostic, "constraint_name", None) or "none",
+            )
             if upload:
                 with connection() as conn, conn.cursor() as cur:
                     cur.execute(
@@ -62,7 +74,13 @@ def ingest_queue(event: dict, _context: object) -> dict:
                     )
             with contextlib.suppress(Exception):
                 s3.delete_object(Bucket=settings.s3_upload_bucket, Key=key)
-        except Exception:
+        except Exception as exc:
+            logger.error(
+                "Upload ingest retryable failure upload_id=%s error_type=%s sqlstate=%s",
+                upload.get("upload_id", "unknown") if upload else "unknown",
+                type(exc).__name__,
+                getattr(exc, "sqlstate", None) or "none",
+            )
             if upload:
                 with connection() as conn, conn.cursor() as cur:
                     cur.execute(
