@@ -33,7 +33,7 @@ jobs:
         with:
           node-version: '22'
       - run: uv sync --locked --extra dev
-      - run: uv run ruff check app tests
+      - run: uv run ruff check app tests scripts/configure_n8n.py
       - run: uv run pytest
 
   frontend:
@@ -50,3 +50,15 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  deployment-tools:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npx --no-install serverless --version
