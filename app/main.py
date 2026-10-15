@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api.notifications import router as notification_router
 from app.api.routes import router
 from app.config import get_settings
 
@@ -24,6 +25,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-Operator-Token", "X-Internal-Token"],
 )
 app.include_router(router)
+app.include_router(notification_router)
 
 
 @app.middleware("http")
@@ -45,7 +47,9 @@ async def security_headers(request: Request, call_next):
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     response.headers.setdefault("Content-Security-Policy", content_security_policy)
     if settings.app_env.lower() == "production":
-        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
     if request.url.path in {"/", "/index.html"}:
         response.headers["Cache-Control"] = "no-store"
     elif request.url.path.startswith("/assets/"):
@@ -56,6 +60,7 @@ async def security_headers(request: Request, call_next):
 web_dist = Path(__file__).resolve().parent.parent / "web" / "dist"
 web_index = web_dist / "index.html"
 if web_index.is_file():
+
     @app.get("/", include_in_schema=False)
     def console_index() -> FileResponse:
         return FileResponse(web_index, media_type="text/html")

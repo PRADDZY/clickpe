@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from app.config import get_settings
 from app.csv_ingestion import ImportErrorCode, import_upload
 from app.database import _secret, all_rows, connection, one_row
+from app.matching import MAX_DECISIONS, PAGE_QUERY
 
 router = APIRouter()
 
@@ -89,6 +90,7 @@ class PersistBatchRequest(BaseModel):
     results: list[ResultRow] = Field(max_length=400)
     last_user_id: str = Field(max_length=128)
     has_more: bool
+    cursor_user_id: str = Field(default="", max_length=128)
 
 
 class PolicySourceRequest(BaseModel):
@@ -100,6 +102,8 @@ class PolicyProposalRequest(PolicySourceRequest):
     provider: str = Field(pattern="^(openrouter|google)$")
     model_name: str = Field(min_length=1, max_length=100)
     rules: dict[str, Any]
+    advertised_rate: str | None = Field(default=None, max_length=500)
+    rate_source_quote: str | None = Field(default=None, max_length=1000)
     evidence: list[dict[str, str]] = Field(max_length=12)
     limitations: list[str] = Field(max_length=12)
 
@@ -167,23 +171,30 @@ def health() -> dict[str, str]:
 @router.get("/api/dashboard")
 def dashboard(_: str = Depends(require_operator)) -> dict[str, Any]:
     runs = all_rows(
-        "SELECT r.run_id::text, r.status, r.row_count, r.duplicate_email_count, r.matched_count, r.unmatched_count, r.review_count, r.created_at "
+        "SELECT r.run_id::text, r.status, r.row_count, r.duplicate_email_count, r.matched_count, r.unmatched_count, r.review_count, r.created_at, r.started_at, r.completed_at, r.error_code, (SELECT COUNT(*) FROM run_policy rp WHERE rp.run_id=r.run_id) AS product_count, (SELECT COUNT(*) FROM eligibility_result e WHERE e.run_id=r.run_id) AS processed_decisions "
         "FROM run r ORDER BY r.created_at DESC LIMIT 8"
     )
     counts = one_row(
         "SELECT COUNT(*) AS total_runs, COALESCE(SUM(row_count),0) AS total_rows FROM run"
     )
     products = all_rows(
-        "SELECT p.product_id,p.lender,p.product_name,p.product_url,s.observed_at,s.extraction_status "
+        "SELECT p.product_id,p.lender,p.product_name,p.product_url,s.observed_at,s.extraction_status,s.advertised_rate "
         "FROM product p LEFT JOIN policy_snapshot s ON s.snapshot_id=p.current_snapshot_id WHERE p.active ORDER BY p.lender"
     )
-    queue = one_row("SELECT COUNT(*) AS pending FROM outbox WHERE status IN ('pending','failed')")
+    queue = one_row(
+        "SELECT COUNT(*) FILTER (WHERE status IN ('pending','processing')) AS pending, COUNT(*) FILTER (WHERE status='failed') AS failed FROM outbox"
+    )
+    heartbeat = one_row(
+        "SELECT last_seen_at>now()-interval '90 seconds' AS online FROM service_heartbeat WHERE service='relay'"
+    )
     return {
         "runs": runs,
         "total_runs": counts["total_runs"],
         "total_rows": counts["total_rows"],
         "products": products,
         "pending_events": queue["pending"],
+        "failed_events": queue["failed"],
+        "relay_online": bool(heartbeat and heartbeat["online"]),
         "storage_mode": "s3" if get_settings().s3_upload_bucket else "local",
         "max_upload_bytes": get_settings().max_upload_bytes,
     }
@@ -192,7 +203,7 @@ def dashboard(_: str = Depends(require_operator)) -> dict[str, Any]:
 @router.get("/api/policies/pending")
 def pending_policies(_: str = Depends(require_operator)) -> list[dict[str, Any]]:
     return all_rows(
-        "SELECT s.snapshot_id::text,s.product_id,p.lender,p.product_name,s.source_url,s.observed_at,s.rules,s.source_excerpt,s.model_provider,s.model_name,s.reviewer_note "
+        "SELECT s.snapshot_id::text,s.product_id,p.lender,p.product_name,s.source_url,s.observed_at,s.rules,s.source_excerpt,s.model_provider,s.model_name,s.reviewer_note,s.advertised_rate,s.rate_source_quote "
         "FROM policy_snapshot s JOIN product p ON p.product_id=s.product_id WHERE s.extraction_status='pending_review' ORDER BY s.observed_at DESC"
     )
 
@@ -407,8 +418,8 @@ def run_results(
         "total"
     ]
     results = all_rows(
-        "SELECT e.result_id::text,e.user_id,e.product_id,p.lender,p.product_name,e.decision,e.reasons,e.rule_version,e.evaluated_at "
-        f"FROM eligibility_result e JOIN product p ON p.product_id=e.product_id WHERE {clause} "
+        "SELECT e.result_id::text,e.user_id,e.product_id,p.lender,p.product_name,e.decision,e.reasons,e.rule_version,e.evaluated_at,e.snapshot_id::text,s.source_url,s.observed_at,s.advertised_rate "
+        f"FROM eligibility_result e JOIN product p ON p.product_id=e.product_id JOIN policy_snapshot s ON s.snapshot_id=e.snapshot_id WHERE {clause} "
         "ORDER BY e.user_id,e.product_id LIMIT %s OFFSET %s",
         [*params, limit, offset],
     )
@@ -427,7 +438,7 @@ def notification_preview(run_id: str, _: str = Depends(require_operator)) -> dic
     with connection() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO notification_event (run_id,user_id,product_id,channel,mode,status,idempotency_key) "
-            "SELECT e.run_id,e.user_id,e.product_id,'email','preview','previewed',e.run_id::text||':'||e.user_id||':'||e.product_id||':preview "
+            "SELECT e.run_id,e.user_id,e.product_id,'email','preview','previewed',e.run_id::text||':'||e.user_id||':'||e.product_id||':preview' "
             "FROM eligibility_result e WHERE e.run_id=%s AND e.decision='eligible' ON CONFLICT (idempotency_key) DO NOTHING",
             (run_id,),
         )
@@ -453,44 +464,12 @@ def notification_preview(run_id: str, _: str = Depends(require_operator)) -> dic
 @router.post("/internal/v1/next-match-batch", dependencies=[Depends(require_internal)])
 def next_match_batch(body: NextBatchRequest) -> dict[str, Any]:
     with connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "UPDATE run SET status='processing',started_at=COALESCE(started_at,now()) WHERE run_id=%s AND status='queued'",
-            (body.run_id,),
-        )
-    rows = all_rows(
-        "WITH page AS MATERIALIZED (SELECT user_id,monthly_income,credit_score,employment_status,age FROM batch_user "
-        "WHERE run_id=%s AND user_id>%s ORDER BY user_id LIMIT 201) "
-        "SELECT page.user_id,page.monthly_income,page.credit_score,page.employment_status,page.age, "
-        "COALESCE(jsonb_agg(jsonb_build_object('product_id',p.product_id,'snapshot_id',s.snapshot_id::text,'rules',s.rules)) "
-        "FILTER (WHERE p.product_id IS NOT NULL AND s.snapshot_id IS NOT NULL),'[]'::jsonb) AS products "
-        "FROM page LEFT JOIN product p ON p.active LEFT JOIN policy_snapshot s ON s.snapshot_id=p.current_snapshot_id AND s.extraction_status='approved' "
-        "GROUP BY page.user_id,page.monthly_income,page.credit_score,page.employment_status,page.age "
-        "ORDER BY page.user_id LIMIT 201",
-        (body.run_id, body.cursor_user_id),
-    )
-    if not rows:
-        with connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE run SET status='completed',completed_at=now() WHERE run_id=%s AND status='processing'",
-                (body.run_id,),
-            )
-            cur.execute(
-                "UPDATE upload SET status='completed',completed_at=now() WHERE run_id=%s",
-                (body.run_id,),
-            )
-            cur.execute(
-                "INSERT INTO outbox (event_type,aggregate_id,payload) VALUES ('notification_preview',%s,jsonb_build_object('run_id',%s::text)) ON CONFLICT DO NOTHING",
-                (body.run_id, body.run_id),
-            )
-        return {"users": [], "has_more": False, "last_user_id": body.cursor_user_id}
-    has_more = len(rows) > 200
-    page_rows = rows[:200]
-    return {
-        "users": page_rows,
-        "has_more": has_more,
-        "last_user_id": page_rows[-1]["user_id"],
-        "run_id": body.run_id,
-    }
+        run = cur.execute("SELECT status FROM run WHERE run_id=%s", (body.run_id,)).fetchone()
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return cur.execute(
+            PAGE_QUERY, {"run_id": body.run_id, "cursor": body.cursor_user_id}
+        ).fetchone()
 
 
 @router.post("/internal/v1/policy-source", dependencies=[Depends(require_internal)])
@@ -511,6 +490,12 @@ def policy_source(body: PolicySourceRequest) -> dict[str, Any]:
 @router.post("/internal/v1/policy-proposals", dependencies=[Depends(require_internal)])
 def policy_proposal(body: PolicyProposalRequest) -> dict[str, Any]:
     _validate_rules(body.rules)
+    if body.advertised_rate and (
+        not body.rate_source_quote or body.rate_source_quote not in body.source_excerpt
+    ):
+        raise HTTPException(
+            status_code=422, detail="The advertised rate needs a quote from the source excerpt"
+        )
     source_digest = hashlib.sha256(body.source_excerpt.encode("utf-8")).hexdigest()
     with connection() as conn, conn.cursor() as cur:
         product = cur.execute(
@@ -520,8 +505,8 @@ def policy_proposal(body: PolicyProposalRequest) -> dict[str, Any]:
         if not product:
             raise HTTPException(status_code=404, detail="Policy source not found")
         inserted = cur.execute(
-            "INSERT INTO policy_snapshot (product_id,source_url,source_digest,model_provider,model_name,extraction_status,rules,source_excerpt,reviewer_note) "
-            "VALUES (%s,%s,%s,%s,%s,'pending_review',%s::jsonb,%s,%s) ON CONFLICT (product_id,source_digest) DO NOTHING RETURNING snapshot_id::text",
+            "INSERT INTO policy_snapshot (product_id,source_url,source_digest,model_provider,model_name,extraction_status,rules,source_excerpt,reviewer_note,advertised_rate,rate_source_quote) "
+            "VALUES (%s,%s,%s,%s,%s,'pending_review',%s::jsonb,%s,%s,%s,%s) ON CONFLICT (product_id,source_digest) DO NOTHING RETURNING snapshot_id::text",
             (
                 body.product_id,
                 product["product_url"],
@@ -534,6 +519,8 @@ def policy_proposal(body: PolicyProposalRequest) -> dict[str, Any]:
                 + json.dumps(body.evidence)[:1_500]
                 + "; limitations="
                 + json.dumps(body.limitations)[:500],
+                body.advertised_rate,
+                body.rate_source_quote,
             ),
         ).fetchone()
         if not inserted:
@@ -547,7 +534,7 @@ def policy_proposal(body: PolicyProposalRequest) -> dict[str, Any]:
                 "review": existing["extraction_status"],
             }
         cur.execute(
-            "INSERT INTO audit_event (actor,action,entity_type,entity_id,details) VALUES (%s,'policy_extracted','snapshot',%s,jsonb_build_object('provider',%s,'model',%s))",
+            "INSERT INTO audit_event (actor,action,entity_type,entity_id,details) VALUES (%s,'policy_extracted','snapshot',%s,jsonb_build_object('provider',%s::text,'model',%s::text))",
             ("n8n-discovery", inserted["snapshot_id"], body.provider, body.model_name),
         )
     return {"status": "pending_review", "snapshot_id": inserted["snapshot_id"]}
@@ -555,62 +542,103 @@ def policy_proposal(body: PolicyProposalRequest) -> dict[str, Any]:
 
 @router.post("/internal/v1/save-match-batch", dependencies=[Depends(require_internal)])
 def save_match_batch(body: PersistBatchRequest) -> dict[str, Any]:
-    allowed = {"eligible", "ineligible", "review"}
-    if any(result.decision not in allowed for result in body.results):
+    if any(row.decision not in {"eligible", "ineligible", "review"} for row in body.results):
         raise HTTPException(status_code=422, detail="Invalid decision")
     with connection() as conn, conn.cursor() as cur:
         run = cur.execute(
-            "SELECT status FROM run WHERE run_id=%s FOR UPDATE", (body.run_id,)
+            "SELECT status,cursor_user_id,row_count FROM run WHERE run_id=%s FOR UPDATE",
+            (body.run_id,),
         ).fetchone()
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
         if run["status"] == "completed":
-            return {"saved": 0, "status": "completed"}
-        cur.executemany(
+            return {"saved": 0, "status": "completed", "cursor_user_id": run["cursor_user_id"]}
+        if run["status"] == "failed":
+            raise HTTPException(
+                status_code=409, detail="Retry the failed run before saving results"
+            )
+        cursor = run["cursor_user_id"] or ""
+        if body.cursor_user_id != cursor:
+            if body.last_user_id and body.last_user_id <= cursor:
+                return {"saved": 0, "status": run["status"], "cursor_user_id": cursor}
+            raise HTTPException(status_code=409, detail="Batch cursor is out of sequence")
+        page = cur.execute(PAGE_QUERY, {"run_id": body.run_id, "cursor": cursor}).fetchone()
+        if not 1 <= page["product_count"] <= MAX_DECISIONS:
+            raise HTTPException(
+                status_code=409, detail="A run requires between 1 and 400 pinned products"
+            )
+        expected = {
+            (u["user_id"], p["product_id"], p["snapshot_id"])
+            for u in page["users"]
+            for p in u["products"]
+        }
+        actual = {(r.user_id, r.product_id, r.snapshot_id) for r in body.results}
+        if (
+            actual != expected
+            or len(actual) != len(body.results)
+            or body.last_user_id != page["last_user_id"]
+            or body.has_more != page["has_more"]
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Batch must contain exactly the expected applicant-policy decisions",
+            )
+        cur.execute(
             "INSERT INTO eligibility_result (run_id,user_id,product_id,snapshot_id,decision,reasons,rule_version) "
-            "SELECT %s,%s,p.product_id,%s,%s,%s::jsonb,%s FROM product p JOIN policy_snapshot s ON s.snapshot_id=%s "
-            "WHERE p.product_id=%s AND p.current_snapshot_id=s.snapshot_id AND s.extraction_status='approved' "
+            "SELECT %s,x.user_id,x.product_id,x.snapshot_id::uuid,x.decision,x.reasons,x.rule_version "
+            "FROM jsonb_to_recordset(%s::jsonb) AS x(user_id text,product_id text,snapshot_id text,decision text,reasons jsonb,rule_version text) "
             "ON CONFLICT (run_id,user_id,product_id) DO UPDATE SET snapshot_id=EXCLUDED.snapshot_id,decision=EXCLUDED.decision,reasons=EXCLUDED.reasons,rule_version=EXCLUDED.rule_version,evaluated_at=now()",
-            [
-                (
-                    body.run_id,
-                    row.user_id,
-                    row.snapshot_id,
-                    row.decision,
-                    __import__("json").dumps(row.reasons),
-                    row.rule_version,
-                    row.snapshot_id,
-                    row.product_id,
-                )
-                for row in body.results
-            ],
+            (body.run_id, json.dumps([r.model_dump() for r in body.results])),
+        )
+        saved = cur.rowcount
+        if saved != len(expected):
+            raise HTTPException(
+                status_code=409,
+                detail="Batch persistence count did not match the expected decisions",
+            )
+        counts = cur.execute(
+            "SELECT COUNT(*) AS total,COUNT(*) FILTER(WHERE decision='eligible') AS matched,"
+            "COUNT(*) FILTER(WHERE decision='ineligible') AS unmatched,COUNT(*) FILTER(WHERE decision='review') AS review "
+            "FROM eligibility_result WHERE run_id=%s",
+            (body.run_id,),
+        ).fetchone()
+        state = "processing" if body.has_more else "completed"
+        if not body.has_more and counts["total"] != run["row_count"] * page["product_count"]:
+            raise HTTPException(
+                status_code=409, detail="Run cannot complete with missing decisions"
+            )
+        cur.execute(
+            "UPDATE run SET status=%s,cursor_user_id=%s,matched_count=%s,unmatched_count=%s,review_count=%s,"
+            "started_at=COALESCE(started_at,now()),completed_at=CASE WHEN %s THEN now() ELSE NULL END,error_code=NULL WHERE run_id=%s",
+            (
+                state,
+                body.last_user_id,
+                counts["matched"],
+                counts["unmatched"],
+                counts["review"],
+                not body.has_more,
+                body.run_id,
+            ),
+        )
+        cur.execute(
+            "UPDATE upload SET status=%s,completed_at=CASE WHEN %s THEN now() ELSE NULL END,error_code=NULL WHERE run_id=%s",
+            (state, not body.has_more, body.run_id),
         )
         if body.has_more:
             cur.execute(
-                "INSERT INTO outbox (event_type,aggregate_id,payload) VALUES ('match_run',%s,jsonb_build_object('run_id',%s::text,'cursor_user_id',%s)) ON CONFLICT DO NOTHING",
+                "INSERT INTO outbox (event_type,aggregate_id,payload) VALUES ('match_run',%s,jsonb_build_object('run_id',%s::text,'cursor_user_id',%s::text)) ON CONFLICT DO NOTHING",
                 (body.run_id, body.run_id, body.last_user_id),
             )
-            state = "processing"
         else:
-            counts = cur.execute(
-                "SELECT COUNT(*) FILTER(WHERE decision='eligible') AS matched,COUNT(*) FILTER(WHERE decision='ineligible') AS unmatched, "
-                "COUNT(*) FILTER(WHERE decision='review') AS review FROM eligibility_result WHERE run_id=%s",
-                (body.run_id,),
-            ).fetchone()
             cur.execute(
-                "UPDATE run SET status='completed',matched_count=%s,unmatched_count=%s,review_count=%s,completed_at=now() WHERE run_id=%s",
-                (counts["matched"], counts["unmatched"], counts["review"], body.run_id),
+                "INSERT INTO outbox (event_type,aggregate_id,payload) VALUES ('notification_preview',%s,jsonb_build_object('run_id',%s::text)) ON CONFLICT DO NOTHING",
+                (body.run_id, body.run_id),
             )
-            cur.execute(
-                "UPDATE upload SET status='completed',completed_at=now() WHERE run_id=%s",
-                (body.run_id,),
-            )
-            state = "completed"
         cur.execute(
-            "INSERT INTO audit_event (actor,action,entity_type,entity_id,details) VALUES ('n8n','match_batch_saved','run',%s,jsonb_build_object('count',%s))",
-            (body.run_id, len(body.results)),
+            "INSERT INTO audit_event (actor,action,entity_type,entity_id,details) VALUES ('n8n','match_batch_saved','run',%s,jsonb_build_object('count',%s::integer))",
+            (body.run_id, saved),
         )
-    return {"saved": len(body.results), "status": state, "cursor_user_id": body.last_user_id}
+    return {"saved": saved, "status": state, "cursor_user_id": body.last_user_id}
 
 
 @router.post("/internal/v1/fail-run/{run_id}", dependencies=[Depends(require_internal)])
