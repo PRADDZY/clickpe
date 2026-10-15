@@ -131,6 +131,12 @@ def import_upload(upload_id: str, object_key: str, filename: str, path: Path) ->
                 "INSERT INTO batch_user (run_id,user_id,name,email,monthly_income,credit_score,employment_status,age) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                 [(run_id, *record) for record in records],
             )
+            cur.execute(
+                "INSERT INTO run_policy (run_id,product_id,snapshot_id) "
+                "SELECT %s,p.product_id,s.snapshot_id FROM product p JOIN policy_snapshot s "
+                "ON s.snapshot_id=p.current_snapshot_id WHERE p.active AND s.extraction_status='approved'",
+                (run_id,),
+            )
             duplicate_emails = cur.execute(
                 "SELECT COUNT(*) - COUNT(DISTINCT lower(email)) AS count FROM batch_user WHERE run_id=%s",
                 (run_id,),
@@ -152,10 +158,6 @@ def import_upload(upload_id: str, object_key: str, filename: str, path: Path) ->
                 (run_id, row_count, digest),
             )
         return ImportedRun(run_id, row_count, row_count, duplicate_emails)
-    except ImportErrorCode:
-        raise
-    except Exception as exc:
-        raise ImportErrorCode("import_failed") from exc
     finally:
         with suppress(OSError):
             path.unlink(missing_ok=True)

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     n8n_webhook_url: str = "http://localhost:5678/webhook/match-run"
     notification_mode: str = "preview"
     test_recipients: str = ""
+    ses_sender: str = ""
 
     @property
     def test_recipient_list(self) -> set[str]:

@@ -13,8 +13,12 @@ logger = logging.getLogger("clickpe.outbox")
 def deliver_once() -> bool:
     settings = get_settings()
     with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO service_heartbeat (service) VALUES ('relay') "
+            "ON CONFLICT (service) DO UPDATE SET last_seen_at=now()"
+        )
         event = cur.execute(
-            "SELECT outbox_id,event_type,payload,attempt_count FROM outbox WHERE "
+            "SELECT outbox_id,event_type,aggregate_id,payload,attempt_count FROM outbox WHERE "
             "((status IN ('pending','failed') AND next_attempt_at<=now() AND attempt_count<10) OR "
             "(status='processing' AND locked_at<now()-interval '5 minutes')) "
             "ORDER BY outbox_id FOR UPDATE SKIP LOCKED LIMIT 1"
