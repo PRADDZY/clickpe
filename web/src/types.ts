@@ -94,6 +94,7 @@ export type Request = <T = unknown>(
   init?: RequestInit,
 ) => Promise<T>;
 export type Workspace = {
+  busy: boolean;
   loaded: boolean;
   token: string;
   setToken: (v: string) => void;
