@@ -308,7 +308,7 @@
       "typeVersion": 2,
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const d=$('Attach personalized message').item.json; const e=JSON.stringify($json.error||$json); const throttled=/Throttling|TooManyRequestsException/.test(e); const rejected=throttled||/MessageRejected|MailFromDomainNotVerified|InvalidParameterValue|AccessDenied/.test(e); return {json:{delivery_id:d.delivery_id,claim_token:d.claim_token,outcome:rejected?'rejected':'uncertain',error_code:throttled?'throttled':(rejected?'rejected':'transport_error')}};"
+        "jsCode": "const d=$('Attach personalized message').item.json;\nconst e=JSON.stringify($json.error||$json);\n// Stock SES node drops AWS XML error codes. HTTP400 is a known rejection,\n// but cannot safely distinguish SES throttling from validation failures.\nconst throttled=/Throttling|TooManyRequestsException|The service is receiving too many requests from you/.test(e);\nconst rejected=throttled||/MessageRejected|MailFromDomainNotVerified|InvalidParameterValue|AccessDenied|Bad request - please check your parameters|Forbidden - perhaps check your credentials|Authorization failed/.test(e);\nreturn {json:{delivery_id:d.delivery_id,claim_token:d.claim_token,outcome:rejected?'rejected':'uncertain',error_code:throttled?'throttled':(rejected?'rejected':'transport_error')}};"
       },
       "position": [
         2680,
@@ -555,7 +555,7 @@
     "saveExecutionProgress": false,
     "timezone": "Asia/Kolkata"
   },
-  "versionId": "f65a3a26-d862-42e3-b183-73ec939e4c15",
+  "versionId": "c6bd951e-afe2-44a2-aab4-e4f61cff6ce9",
   "meta": {
     "templateCredsSetupCompleted": false
   },

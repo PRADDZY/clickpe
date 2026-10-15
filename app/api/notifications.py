@@ -134,6 +134,31 @@ def claim_notifications(body: ClaimBatch) -> dict[str, Any]:
     return {"deliveries": deliveries}
 
 
+@router.post("/resume-notifications/{run_id}")
+def resume_notifications(run_id: UUID) -> dict[str, int]:
+    """Explicit recovery for deferred or definitively rejected work, never ambiguous sends."""
+    if get_settings().notification_mode != "test":
+        raise HTTPException(status_code=409, detail="Controlled delivery is disabled")
+    sender, recipients = delivery_configuration()
+    if not sender or not recipients:
+        raise HTTPException(status_code=409, detail="Configure controlled delivery first")
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE notification_delivery SET status='ready',sender=%s, "
+            "recipient=(%s::text[])[1+get_byte(decode(md5(user_id),'hex'),0) %% %s::int], "
+            "claim_token=NULL,lease_until=NULL,error_code=NULL,attempt_count=0,next_attempt_at=now() "
+            "WHERE run_id=%s AND mode='test' AND status IN ('deferred','failed')",
+            (sender, recipients, len(recipients), run_id),
+        )
+        resumed = cur.rowcount
+        cur.execute(
+            "INSERT INTO audit_event (actor,action,entity_type,entity_id,details) "
+            "VALUES ('operator','notifications_resumed','run',%s,jsonb_build_object('count',%s::int))",
+            (str(run_id), resumed),
+        )
+    return {"resumed": resumed}
+
+
 @router.post("/notification-deliveries/{delivery_id}/begin")
 def begin_delivery(delivery_id: UUID, body: DeliveryClaim) -> dict[str, Any]:
     settings = get_settings()
