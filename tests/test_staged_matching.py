@@ -9,7 +9,7 @@ from test_pipeline import db as db
 from test_pipeline import evaluate, imported_run
 
 from app import database
-from app.api.routes import NextBatchRequest, next_match_batch, save_match_batch
+from app.api.routes import NextBatchRequest, _validate_rules, next_match_batch, save_match_batch
 from app.eligibility import evaluate as reference_evaluate
 
 
@@ -17,6 +17,7 @@ def test_staged_screen_preserves_decisions_and_all_findings(db, tmp_path):
     base = database.one_row(
         "SELECT rules FROM policy_snapshot WHERE product_id='axis-personal-salaried'"
     )["rules"]
+    base["monthly_income"]["location_dependent"] = False
     variants = []
     for field in ("employment", "age", "monthly_income", "credit_score"):
         rules = copy.deepcopy(base)
@@ -25,11 +26,16 @@ def test_staged_screen_preserves_decisions_and_all_findings(db, tmp_path):
     rules = copy.deepcopy(base)
     rules["credit_score"] = {"kind": "required", "min": 700}
     variants.append(rules)
+    for kind, minimum in (("required", 700.5), ("preferred", 700.0)):
+        rules = copy.deepcopy(base)
+        rules["credit_score"] = {"kind": kind, "min": minimum}
+        variants.append(rules)
     rules = copy.deepcopy(base)
     rules["monthly_income"]["location_dependent"] = True
     variants.append(rules)
     with database.connection() as conn:
         for i, rules in enumerate(variants):
+            _validate_rules(rules)
             product_id = f"staged-fixture-{i}"
             conn.execute(
                 "INSERT INTO product (product_id,lender,product_name,product_url) VALUES (%s,'Fixture','Fixture','https://example.invalid')",
@@ -68,7 +74,7 @@ def test_staged_screen_preserves_decisions_and_all_findings(db, tmp_path):
     page = next_match_batch(NextBatchRequest(run_id=run.run_id))
     assert page["prefiltered_count"] > 0
     assert page["candidate_count"] > 0
-    assert page["prefiltered_count"] + page["candidate_count"] == 96
+    assert page["prefiltered_count"] + page["candidate_count"] == 120
     products = database.all_rows(
         "SELECT rp.product_id,s.snapshot_id::text,s.rules FROM run_policy rp JOIN policy_snapshot s ON s.snapshot_id=rp.snapshot_id WHERE rp.run_id=%s ORDER BY rp.product_id",
         (run.run_id,),

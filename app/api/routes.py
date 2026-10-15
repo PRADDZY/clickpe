@@ -350,7 +350,7 @@ def upload_status(upload_id: str, _: str = Depends(require_operator)) -> dict[st
 @router.get("/api/runs/{run_id}")
 def run_status(run_id: str, _: str = Depends(require_operator)) -> dict[str, Any]:
     row = one_row(
-        "SELECT run_id::text,upload_id::text,status,row_count,distinct_users,duplicate_email_count,matched_count,unmatched_count,review_count,error_code,created_at,started_at,completed_at FROM run WHERE run_id=%s",
+        "SELECT run_id::text,upload_id::text,status,row_count,distinct_users,duplicate_email_count,matched_count,unmatched_count,review_count,error_code,created_at,started_at,completed_at,prefiltered_count,candidate_count,notification_mode FROM run WHERE run_id=%s",
         (run_id,),
     )
     if not row:
