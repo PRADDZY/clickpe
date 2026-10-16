@@ -68,7 +68,7 @@ def test_discovery_rates_and_quotes_are_literal_source_choices():
 const {codes}=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const source={product_id:'fixture',lender:'Fixture lender',product_name:'Fixture loan',
  product_url:'https://example.com',source_excerpt:
- 'Personal loan interest rate starts at 10% p.a. to 30.50% p.a.\\nProcessing fee up to 4.13% payable at disbursement.\\nInterest rate is 10–30.50% p.a.\\nMinimum age 21 years.'};
+ 'Personal loan interest rate starts at 10% p.a. to 30.50% p.a.\\nProcessing fee up to 4.13% payable at disbursement.\\nInterest rate is 10–30.50% p.a.\\nInterest rate between 10% and 30.50% p.a.\\nMinimum age 21 years.'};
 const base=new Function('$',codes['Build strict extraction request · Code'])(
  ()=>({item:{json:source}})).json;
 const rate='starts at 10% p.a. to 30.50% p.a.';
@@ -104,6 +104,7 @@ console.log(JSON.stringify({schema:base.request.response_format.json_schema.sche
         assert "4.13%" not in schema["properties"]["advertised_rate"]["enum"]
         assert "10% to 30.5% p.a." not in schema["properties"]["advertised_rate"]["enum"]
         assert "10–30.50% p.a." in schema["properties"]["advertised_rate"]["enum"]
+        assert "between 10% and 30.50% p.a." in schema["properties"]["advertised_rate"]["enum"]
     assert not any("Processing fee" in quote for quote in data["rate_quotes"])
     assert not any(
         isinstance(value, str) and "4.13% pa" in value
