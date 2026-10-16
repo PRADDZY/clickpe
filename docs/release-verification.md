@@ -1,63 +1,66 @@
 # Release verification
 
-Verified on 16 October 2026. Submission deadline: **17 October 2026, 15:44 IST**, as corrected by the user.
+Updated **17 October 2026** (Asia/Kolkata). The user clarified the 72-hour deadline as 17 October 2026 at 15:44 IST.
 
-## Initial workspace release
+## Current deployed release
 
 - [Hosted workspace](https://vqm5co28ei.execute-api.ap-south-1.amazonaws.com)
-- Initial Lambda and EC2 API health checks both reported `41f0ff2331f67602c689b567c09a1dd405a647f4`.
-- The deployment preserved the current EC2 instance and AMI, waited for cloud-init, and completed its Systems Manager rollout successfully.
-- At that check, matching and notification workflows were published; discovery was inactive pending private provider credentials.
-- Temporary SES role assumption succeeded. That release used preview mode with zero configured delivery recipients.
-- [Merged implementation](https://github.com/PRADDZY/clickpe/pull/1), [merged host rollout fix](https://github.com/PRADDZY/clickpe/pull/2).
+- Main revision: `894ca0b7d1bc6fb4c824f771888cc0ecba2c658d`, merged through [PR #6](https://github.com/PRADDZY/clickpe/pull/6).
+- The public Lambda health endpoint and private EC2 API both report the same revision and `status=ok`.
+- The rollout preserved EC2 instance `i-022165dd937251bd9`. SSM completed successfully; API, database, n8n, relay, runner and web containers were healthy.
+- **All three workflows are active.** The temporary discovery verification workflow was deleted after the check.
+- Notification mode is **preview**. The host has two controlled recipients configured, and the dedicated SES role assumption was verified.
+- The stack is public for the demo and continues to incur AWS charges while it exists.
 
 ## Automated checks
 
-[Merged-release CI](https://github.com/PRADDZY/clickpe/actions/runs/38918821169): **39 passed, 1 skipped**; Ruff and frontend build passed. The skipped backend check requires built frontend assets, which are built in the separate frontend job. Deployed page and asset serving were checked directly below.
+- [PR #6 CI](https://github.com/PRADDZY/clickpe/actions/runs/38952936949): backend, deployment-tools, and frontend jobs all passed.
+- Local `uv run pytest` passed its runnable tests; PostgreSQL integration cases were skipped because no local test database was configured. `uv run ruff check app tests`, workflow JSON parsing and `git diff --check` passed.
+- [Isolated matching benchmark](https://github.com/PRADDZY/clickpe/actions/runs/38914198384): all 500,000 decisions and ordered explanations matched the frozen previous evaluator. It eliminated 75.96% of JavaScript candidates; this component benchmark excludes persistence and n8n orchestration.
 
-[Isolated matching benchmark](https://github.com/PRADDZY/clickpe/actions/runs/38914198384): all 500,000 decisions and ordered explanations matched the frozen previous evaluator. See [benchmark measurements and limits](benchmark.md).
+## Visible 10,000-row run
 
-## Visible Chrome verification
+Headed Playwright verified the hosted UI and uploaded the supplied CSV in Preview mode. Run `dbc3c908-6ef6-4e2d-ae02-b755321de963` completed with 10,000 profiles, two pinned products and 20,000 decisions.
 
-Used headed Playwright against the hosted release, with private operator-token retrieval and no credential logging.
+- 2,281 applicants matched; 7,719 needed review; none were left unmatched or processing.
+- SQL rejected 6,611 product pairs before the candidate evaluator and sent 13,389 to JavaScript, a 33.06% reduction in candidate work.
+- Matching took **42.14 seconds**. This is matching time only; upload and import time are excluded.
+- All 2,281 applicant notifications were previews; zero were sent.
+- Navigation, refresh recovery, result filters, 25/50 pagination, drawer keyboard behavior, 390-pixel layout, and a simulated upload-signing failure were checked in visible Chrome.
 
-- Signed in and loaded Overview, Applicants and Policies directly by URL.
-- Confirmed an unknown API path returns 404.
-- Uploaded the supplied 10,000-row CSV and observed visible Upload, Import, Match and Ready phases.
-- Navigated to Policies and back, then refreshed during matching; processing resumed.
-- Saved all 20,000 product decisions for run `dbc3c908-6ef6-4e2d-ae02-b755321de963`.
-- Checked next-page navigation, 25/50 page sizes, status filtering, empty prefix search and page reset.
-- Opened the decision drawer, closed it with Escape and confirmed focus returned to its trigger.
-- Checked a 390-pixel mobile viewport: no document-level horizontal overflow.
-- Aborted a signing request locally in the browser and confirmed visible upload failure with file selection available again. This did not send a file or alter the completed run.
-- Confirmed 2,281 notification previews, zero sent, zero pending and zero needing attention.
+This run used runtime revision `41f0ff2`; the final deployment changed discovery extraction only. The matching and notification behavior was not changed by PR #6.
 
-Local screenshots and the numeric browser report are under ignored `output/playwright/` and `.runtime/live-report.json`. They contain no operator token or signed upload fields. The visible browser was left open for inspection.
+## Live policy discovery
 
-## Credentials and received-email demonstration
+On 17 October, the deployed discovery workflow was run through a temporary manual trigger built from the actual active workflow. The normal daily schedule was left unchanged, and the temporary workflow was removed afterward.
 
-Completed later on 16 October 2026 at runtime revision `f20a6a0`:
+- Both configured official lender pages were fetched.
+- The selected free OpenRouter model was used. The execution exited successfully and created a pending Bajaj Finance proposal with model `nvidia/nemotron-3-super-120b-a12b:free`.
+- It proposed `Starting from 10% p.a.` and cited `Interest rate: Starting from 10% p.a.*`. The quoted text is present verbatim in the fetched source excerpt.
+- The proposal returned all eligibility rules as unknown and no evidence items. It remains `pending_review`; it was **not approved**, and the active catalogue did not change. The existing curated policy remains in force. Do not present this proposal as complete eligibility extraction.
+- A previous Axis Bank proposal also remains pending. Its evidence text contains source excerpts, but the extracted matching rules are unknown. An operator should inspect both official pages before deciding whether to reject or replace these proposals.
 
-- `keys.txt` was added to `.gitignore` before staging and was never tracked. Both provider keys authenticated successfully and were transferred privately to the n8n host. No key values are stored in this report or repository.
-- All three workflows were published with the provider credentials bound.
-- AWS confirmed the controlled email identity as verified in `ap-south-1`.
-- Test delivery was restricted to that verified address, with a three-message run cap.
-- Headed Chrome uploaded three invented eligible applicants for run `b29cae53-27cd-442f-bceb-6f42e48e6c02`.
-- All three applicants matched; the notification ledger recorded **3 sent, 0 pending, 0 needing attention**.
-- The user confirmed **all three personalized emails arrived in Spam**. Received delivery is demonstrated; Inbox placement is not.
-- Preview mode was restored and verified on Lambda and EC2 at `f20a6a0`; one controlled recipient remains configured and all three workflows remain published.
+PR #6 fixed the source-rate bug found during the first live attempt. Rates are now enumerated from literal source text, including shared-percent and “between … and …” ranges; unit matching cannot take `pa` from a word such as “payable.” Both provider validators choose a source quote containing the selected literal rate. The API still rejects rate quotes not found in the source excerpt.
 
-The DOCX explicitly requests test-inbox aliases. The completed base-address run proves delivery, but permission to verify and demonstrate two Gmail plus aliases remains pending. Do not represent the alias-specific criterion as complete.
+The paid OpenRouter model was unavailable due to the account's lack of credits. The user selected the free OpenRouter model. A private availability probe returned a successful zero-cost structured response. Gemini authentication succeeded, but the earlier live fallback attempt received a provider 503; Gemini was not needed in the final successful run and is not claimed as exercised successfully.
 
-Local evidence: ignored `.runtime/ses-demo-report.json` and `output/playwright/ses-three-sent.png`. Preserve the received messages for the recording; mask the inbox address when sharing it.
+## Controlled SES demonstration
 
-## Submission work still pending
+- SES verified the controlled sender and both user-owned Gmail plus aliases in `ap-south-1`.
+- Headed Chrome uploaded three invented eligible applicants for run `a21cde4c-0831-4436-b1e9-db21ae668e93`. All three matched and the delivery ledger recorded **3 sent, 0 pending, 0 needing attention**.
+- Ledger routing used both aliases: two messages to one alias and one to the other.
+- The user confirmed all three personalized messages arrived and that both aliases were shown. This completes the assignment's test-alias requirement. Inbox placement is not claimed.
+- The earlier base-address run `b29cae53-27cd-442f-bceb-6f42e48e6c02` also had three received messages, which the user reported arrived in Spam.
+- Test delivery defaults to three messages per run and a 180-message rolling daily budget. All test destinations come from the controlled allowlist, never from the CSV. Preview mode has been restored.
 
-1. Run discovery and retain source-supported extraction/review evidence. A live check fetched both official pages and reached both providers, but OpenRouter returned 402 (no purchased credits) and Gemini returned 503 (temporary high demand), including a retry. No proposals were accepted and the catalogue was unchanged. The check used an unpublished workflow copy with a temporary CLI start trigger; the original daily workflow was unchanged. A free-model versus paid-credit choice is pending.
-2. Verify and demonstrate the two owned plus aliases requested by the assignment, subject to the user's pending authorization.
-3. Complete the n8n owner/editor setup for recording access; deployment and server CLI checks do not create the user's editor password.
-4. Record the 5–10 minute walkthrough using [the demo script](demo-script.md).
-5. Invite the assignment's four GitHub reviewers when the user is ready; invitations are explicitly deferred.
-6. Complete the submission form manually with repository and recording links.
+## Remaining submission handoffs
 
-The repository and hosted workspace do not establish completion of the remaining live discovery, alias-specific demonstration or recording requirements.
+The n8n owner setup is incomplete. The user must create their own private owner password; passwords are not requested or stored here. No browser or Session Manager tunnel is currently open. Start the tunnel with `scripts/Open-N8n.ps1 -AwsProfile dpratik`, then open `http://localhost:5678` to finish setup.
+
+Still needed for the assignment's final submission:
+
+1. Finish n8n owner setup, then record the required 5–10 minute end-to-end walkthrough and show one received synthetic email. A detailed narration script is saved locally as `.runtime/submission-demo-script.md` and is intentionally ignored/uncommitted.
+2. Add the four requested GitHub reviewers. The user previously deferred the invites; none have been sent.
+3. Submit the private repository URL and recording URL through the [assignment form](https://docs.google.com/forms/d/e/1FAIpQLSe1ET4U8rOcPM3VGJ8fT5HhigTO9fKuDlsB_wHtB5acWys9XQ/viewform).
+
+The repository and hosted service are ready. The video, reviewer access, owner setup, and form submission are not yet complete.

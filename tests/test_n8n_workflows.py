@@ -5,24 +5,37 @@ from pathlib import Path
 WORKFLOW_DIR = Path(__file__).resolve().parents[1] / "n8n" / "workflows"
 
 
-def test_discovery_uses_free_structured_model_and_records_requested_model():
+def discovery_codes():
     workflow = json.loads(
         (WORKFLOW_DIR / "01-discover-official-policies.json").read_text(encoding="utf-8")
     )
-    codes = {
-        node["name"]: node["parameters"].get("jsCode", "") for node in workflow["nodes"]
+    nodes = workflow["nodes"]
+
+    def code(prefix):
+        node = next(item for item in nodes if item["name"].startswith(prefix))
+        return node["parameters"].get("jsCode", "")
+
+    return {
+        "build": code("Build strict extraction request"),
+        "validate_primary": code("Validate primary extraction"),
+        "prepare_gemini": code("Prepare Gemini fallback"),
+        "validate_gemini": code("Validate Gemini extraction"),
     }
+
+
+def test_discovery_uses_free_structured_model_and_records_requested_model():
+    codes = discovery_codes()
     script = """
 const {codes}=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const source={product_id:'fixture',lender:'Fixture lender',product_name:'Fixture loan',
  product_url:'https://example.com',source_excerpt:'Official fixture terms for extraction.'};
-const build=new Function('$',codes['Build strict extraction request · Code']);
+const build=new Function('$',codes.build);
 const base=build(()=>({item:{json:source}})).json;
 const request=JSON.parse(JSON.stringify(base.request));
 base.request.model='fixture-selected-model';
 const parsed={employment:{kind:'unknown'},age:{kind:'unknown'},
  monthly_income:{kind:'unknown'},credit_score:{kind:'unknown'}};
-const validate=new Function('$json','$',codes['Validate primary extraction · Code']);
+const validate=new Function('$json','$',codes.validate_primary);
 const result=validate({choices:[{message:{content:JSON.stringify(parsed)}}]},
  ()=>({item:{json:base}})).json;
 console.log(JSON.stringify({request,model_name:result.model_name}));
@@ -58,32 +71,27 @@ def test_discovery_provider_retries_are_bounded():
 
 
 def test_discovery_rates_and_quotes_are_literal_source_choices():
-    workflow = json.loads(
-        (WORKFLOW_DIR / "01-discover-official-policies.json").read_text(encoding="utf-8")
-    )
-    codes = {
-        node["name"]: node["parameters"].get("jsCode", "") for node in workflow["nodes"]
-    }
+    codes = discovery_codes()
     script = """
 const {codes}=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const source={product_id:'fixture',lender:'Fixture lender',product_name:'Fixture loan',
  product_url:'https://example.com',source_excerpt:
  'Personal loan interest rate starts at 10% p.a. to 30.50% p.a.\\nProcessing fee up to 4.13% payable at disbursement.\\nInterest rate is 10–30.50% p.a.\\nInterest rate between 10% and 30.50% p.a.\\nMinimum age 21 years.'};
-const base=new Function('$',codes['Build strict extraction request · Code'])(
+const base=new Function('$',codes.build)(
  ()=>({item:{json:source}})).json;
 const rate='starts at 10% p.a. to 30.50% p.a.';
 const parsed={employment:{kind:'unknown'},age:{kind:'unknown'},
  monthly_income:{kind:'unknown'},credit_score:{kind:'unknown'},
  advertised_rate:rate,rate_source_quote:'A paraphrased quote that is not in the source'};
-const validate=new Function('$json','$',codes['Validate primary extraction · Code']);
+const validate=new Function('$json','$',codes.validate_primary);
 const result=validate({choices:[{message:{content:JSON.stringify(parsed)}}]},
  ()=>({item:{json:base}})).json;
 let rejected=false;
 try {validate({choices:[{message:{content:JSON.stringify({...parsed,advertised_rate:'10% to 30.5% p.a.'})}}]},
  ()=>({item:{json:base}}));}catch{rejected=true;}
-const fallback=new Function('$',codes['Prepare Gemini fallback · Code'])(
+const fallback=new Function('$',codes.prepare_gemini)(
  ()=>({item:{json:base}})).json;
-const google=new Function('$json','$',codes['Validate Gemini extraction · Code'])(
+const google=new Function('$json','$',codes.validate_gemini)(
  {candidates:[{content:{parts:[{text:JSON.stringify(parsed)}]}}]},
  ()=>({item:{json:fallback}})).json;
 console.log(JSON.stringify({schema:base.request.response_format.json_schema.schema,
@@ -116,6 +124,98 @@ console.log(JSON.stringify({schema:base.request.response_format.json_schema.sche
             "Personal loan interest rate starts at 10% p.a. to 30.50% p.a."
         )
     assert data["rejected"] is True
+
+
+def test_discovery_only_promotes_explicit_credit_score_thresholds():
+    codes = discovery_codes()
+    script = """
+const {codes}=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const build=new Function('$',codes.build);
+const validate=new Function('$json','$',codes.validate_primary);
+const prepareGemini=new Function('$',codes.prepare_gemini);
+const validateGemini=new Function('$json','$',codes.validate_gemini);
+function run(source_excerpt, modelScore={kind:'unknown'}) {
+  const source={product_id:'fixture',lender:'Fixture lender',product_name:'Fixture loan',
+    product_url:'https://example.com',source_excerpt};
+  const base=build(()=>({item:{json:source}})).json;
+  const parsed={employment:{kind:'unknown'},age:{kind:'unknown'},
+    monthly_income:{kind:'unknown'},credit_score:modelScore};
+  const primary=validate({choices:[{message:{content:JSON.stringify(parsed)}}]},
+    ()=>({item:{json:base}})).json;
+  const fallback=prepareGemini(()=>({item:{json:base}})).json;
+  const google=validateGemini({candidates:[{content:{parts:[{text:JSON.stringify(parsed)}]}}]},
+    ()=>({item:{json:fallback}})).json;
+  return {primary,google};
+}
+console.log(JSON.stringify({
+  required:run('Eligibility. CIBIL Score: 650 and above required.'),
+  inclusive_before:run('Eligibility. Minimum CIBIL score at or above 650.'),
+  preferred:run('Eligibility. Credit score of 700 is preferred.',{kind:'required',min:640}),
+  preferred_before_number:run('Eligibility. Recommended minimum credit score: 700.',{kind:'required',min:640}),
+  negated:run('Eligibility. CIBIL Score is not required.'),
+  negated_before_number:run('Eligibility. No minimum CIBIL score of 650 is required.',{kind:'required',min:640}),
+  strict_greater:run('Eligibility. CIBIL score > 650 is required.',{kind:'required',min:640}),
+  upper_bound:run('Eligibility. Credit score below 650 is required.',{kind:'required',min:640}),
+  upper_bound_after_number:run('Eligibility. CIBIL score 650 or below is required.',{kind:'required',min:640}),
+  unicode_lower_bound:run('Eligibility. Credit score '+String.fromCharCode(0x2265)+' 650 is required.'),
+  unicode_upper_bound:run('Eligibility. Credit score '+String.fromCharCode(0x2264)+' 650 is required.',{kind:'required',min:640}),
+  multiple_thresholds:run('Eligibility. Minimum credit score 650 required, 750 preferred.',{kind:'required',min:640}),
+  ambiguous:run('Eligibility. Credit score is considered with the application.')
+}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        input=json.dumps({"codes": codes}),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    for provider in ("primary", "google"):
+        assert data["required"][provider]["rules"]["credit_score"] == {
+            "kind": "required",
+            "min": 650,
+        }
+        assert data["required"][provider]["evidence"] == [
+            {"criterion": "credit_score", "source_quote": "CIBIL Score: 650 and above required"}
+        ]
+        assert data["inclusive_before"][provider]["rules"]["credit_score"] == {
+            "kind": "required",
+            "min": 650,
+        }
+        assert data["unicode_lower_bound"][provider]["rules"]["credit_score"] == {
+            "kind": "required",
+            "min": 650,
+        }
+        assert data["preferred"][provider]["rules"]["credit_score"] == {
+            "kind": "preferred",
+            "min": 700,
+        }
+        assert data["preferred"][provider]["evidence"] == [
+            {"criterion": "credit_score", "source_quote": "Credit score of 700 is preferred"}
+        ]
+        assert data["preferred_before_number"][provider]["rules"]["credit_score"] == {
+            "kind": "preferred",
+            "min": 700,
+        }
+        assert data["preferred_before_number"][provider]["evidence"] == [
+            {"criterion": "credit_score", "source_quote": "Recommended minimum credit score: 700"}
+        ]
+        for name in ("negated", "ambiguous"):
+            assert data[name][provider]["rules"]["credit_score"] == {"kind": "unknown"}
+            assert data[name][provider]["evidence"] == []
+        for name, quote in (
+            ("negated_before_number", "No minimum CIBIL score of 650 is required"),
+            ("strict_greater", "CIBIL score > 650 is required"),
+            ("upper_bound", "Credit score below 650 is required"),
+            ("upper_bound_after_number", "CIBIL score 650 or below is required"),
+            ("unicode_upper_bound", "Credit score \u2264 650 is required"),
+            ("multiple_thresholds", "Minimum credit score 650 required, 750 preferred"),
+        ):
+            result = data[name][provider]
+            assert result["rules"]["credit_score"] == {"kind": "unknown"}
+            assert result["evidence"] == [{"criterion": "credit_score", "source_quote": quote}]
+            assert result["limitations"]
 
 
 def test_workflow_exports_are_valid_and_have_no_embedded_credentials():
