@@ -439,9 +439,10 @@
     "saveManualExecutions": false,
     "saveDataErrorExecution": "none",
     "saveDataSuccessExecution": "none",
-    "saveExecutionProgress": false
+    "saveExecutionProgress": false,
+    "timezone": "Asia/Kolkata"
   },
-  "versionId": "6409b8d2-7788-4c91-b868-0c04d3d79cad",
+  "versionId": "621f781c-9ba5-4298-861a-1604928fea5b",
   "meta": {
     "templateCredsSetupCompleted": false
   },

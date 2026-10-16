@@ -1,287 +1,196 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useState } from "react";
 import {
-  ArrowRight, BadgeCheck, Banknote, Check, ChevronDown,
-  CircleHelp, CirclePlay, FileChartColumn, FileText, Fingerprint,
-  FolderClock, LockKeyhole, LogOut, MoreHorizontal, RotateCw,
-  Search, ShieldCheck, UploadCloud, X,
-} from 'lucide-react'
-import './upload-feedback.css'
-import './run-details.css'
-
-const API = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? 'http://localhost:8000' : '')
-type Decision = 'eligible' | 'ineligible' | 'review'
-type Run = {
-  run_id: string; status: string; row_count: number; duplicate_email_count: number
-  matched_count: number; unmatched_count: number; review_count: number; created_at: string
-  product_count?: number; processed_decisions?: number
-  error_code?: string | null
-}
-type UploadStatus = { status: string; run_id: string | null; error_code: string | null }
-type UploadFeedback = { tone: 'info' | 'success' | 'error'; message: string }
-type Product = {
-  product_id: string; lender: string; product_name: string; product_url: string
-  observed_at: string | null; extraction_status: string | null; advertised_rate?: string | null
-}
-type PendingPolicy = {
-  snapshot_id: string; product_id: string; lender: string; product_name: string
-  source_url: string; observed_at: string; rules: Record<string, { kind: string; status?: string; min?: number; max?: number; currency?: string; location_dependent?: boolean }>
-  advertised_rate?: string | null; rate_source_quote?: string | null
-  source_excerpt: string; model_provider: string; model_name: string; reviewer_note: string
-}
-type Dashboard = { runs: Run[]; total_runs: number; total_rows: number; pending_events: number; failed_events: number; relay_online: boolean; products: Product[]; storage_mode: 's3' | 'local'; max_upload_bytes: number }
-type Match = {
-  result_id: string; user_id: string; product_id: string; lender: string; product_name: string
-  snapshot_id: string; source_url: string; observed_at: string; rule_version: string
-  decision: Decision; reasons: { criterion: string; status: string; minimum?: number; maximum?: number; message?: string; observed_value?: string | number; required_value?: string; preferred_minimum?: number; currency?: string }[]
-}
-
-const fmt = (value: number) => new Intl.NumberFormat('en-IN').format(value || 0)
-const uploadErrorMessages: Record<string, string> = {
-  empty_csv: 'The CSV has no applicant rows.',
-  file_too_large: 'The CSV exceeds the 25 MiB upload limit.',
-  import_failed: 'The CSV reached storage, but the database could not import it.',
-  ingest_retryable: 'The importer hit a temporary error and is retrying.',
-  invalid_csv: 'The CSV could not be parsed. Check its formatting and try again.',
-  invalid_csv_schema: 'Use these columns: user_id, name, email, monthly_income, credit_score, employment_status, age.',
-  invalid_encoding: 'Save the CSV as UTF-8, then try again.',
-  invalid_row: 'At least one row has a missing or invalid value. Check the CSV and try again.',
-  matching_failed: 'The CSV imported, but eligibility matching failed. Check the run details.',
-  too_many_rows: 'The CSV exceeds the 100,000 row limit.',
-  upload_not_found: 'The importer could not find this upload. Please try again.',
-  workflow_unavailable: 'The CSV imported, but the matching workflow is unavailable.',
-}
-const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds))
-const relative = (value: string) => {
-  const seconds = Math.round((Date.now() - new Date(value).getTime()) / 1000)
-  if (seconds < 60) return 'Just now'
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
-  return new Date(value).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
-}
-
-export default function App() {
-  const [token, setToken] = useState(() => sessionStorage.getItem('clickpe-operator-token') || '')
-  const [draftToken, setDraftToken] = useState('')
-  const [dashboard, setDashboard] = useState<Dashboard | null>(null)
-  const [pendingPolicies, setPendingPolicies] = useState<PendingPolicy[]>([])
-  const [selectedRun, setSelectedRun] = useState<Run | null>(null)
-  const [results, setResults] = useState<Match[]>([])
-  const [totalResults, setTotalResults] = useState(0)
-  const [page, setPage] = useState(0)
-  const [selectedMatch, setSelectedMatch] = useState<Match | null>(null)
-  const [retrying, setRetrying] = useState(false)
-  const [resultsLoading, setResultsLoading] = useState(false)
-  const detailDialog = useRef<HTMLDialogElement>(null)
-  const [filter, setFilter] = useState<'all' | Decision>('all')
-  const [authError, setAuthError] = useState('')
-  const [error, setError] = useState('')
-  const [uploadFeedback, setUploadFeedback] = useState<UploadFeedback | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [dragging, setDragging] = useState(false)
-  const [preview, setPreview] = useState<{ eligible_matches: number; distinct_email_addresses: number } | null>(null)
-  const fileInput = useRef<HTMLInputElement>(null)
-
-  const request = async (path: string, init: RequestInit = {}) => {
-    const response = await fetch(`${API}${path}`, {
-      ...init,
-      headers: { 'X-Operator-Token': token, ...(init.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...init.headers },
-    })
-    if (response.status === 401) {
-      sessionStorage.removeItem('clickpe-operator-token'); setToken(''); setAuthError('Your session ended. Enter the operator token again.')
-      throw new Error('Session expired')
-    }
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}))
-      throw new Error(body.detail || `Request failed (${response.status})`)
-    }
-    return response.json()
-  }
-
-  const refresh = async (preferredRunId?: string) => {
-    if (!token) return
-    try {
-      const data = await request('/api/dashboard') as Dashboard
-      const policies = await request('/api/policies/pending') as PendingPolicy[]
-      setDashboard(data); setPendingPolicies(policies); setError('')
-      setSelectedRun((current) => data.runs.find((r) => r.run_id === (preferredRunId || current?.run_id)) || current || data.runs[0] || null)
-    } catch (e) { if ((e as Error).message !== 'Session expired') setError((e as Error).message) }
-  }
-
-  useEffect(() => { if (token) void refresh() }, [token])
-  useEffect(() => { if (!token) return; const timer = window.setInterval(() => { void refresh() }, 6000); return () => clearInterval(timer) }, [token, selectedRun?.run_id])
-  useEffect(() => { setPage(0); setPreview(null); setSelectedMatch(null) }, [selectedRun?.run_id, filter])
-  useEffect(() => {
-    if (!token || !selectedRun) return
-    const controller = new AbortController()
-    setResultsLoading(true)
-    const decision = filter === 'all' ? '' : `&decision=${filter}`
-    request(`/api/runs/${selectedRun.run_id}/results?limit=40&offset=${page * 40}${decision}`, { signal: controller.signal })
-      .then((data) => { if (!controller.signal.aborted) { setResults(data.results); setTotalResults(data.total) } })
-      .catch((e) => { if (!controller.signal.aborted) setError((e as Error).message) })
-      .finally(() => { if (!controller.signal.aborted) setResultsLoading(false) })
-    return () => controller.abort()
-  }, [token, selectedRun?.run_id, filter, page, selectedRun?.status, selectedRun?.matched_count, selectedRun?.unmatched_count, selectedRun?.review_count])
-  useEffect(() => { if (selectedMatch) detailDialog.current?.showModal(); else detailDialog.current?.close() }, [selectedMatch])
-
-  const retryRun = async () => {
-    if (!selectedRun) return
-    setRetrying(true)
-    try { await request(`/api/runs/${selectedRun.run_id}/retry`, { method: 'POST' }); await refresh() }
-    catch (e) { setError((e as Error).message) }
-    finally { setRetrying(false) }
-  }
-
-  const metrics = useMemo(() => {
-    const run = selectedRun
-    return [
-      { label: 'Profiles received', value: fmt(run?.row_count || 0), caption: run ? `${fmt(run.duplicate_email_count)} repeated email addresses` : 'Select a run to see results', icon: FileText, tone: 'blue' },
-      { label: 'Eligible matches', value: fmt(run?.matched_count || 0), caption: 'Meet every confirmed rule', icon: BadgeCheck, tone: 'green' },
-      { label: 'Do not meet known rules', value: fmt(run?.unmatched_count || 0), caption: 'Failed at least one hard requirement', icon: ShieldCheck, tone: 'red' },
-      { label: 'Manual review', value: fmt(run?.review_count || 0), caption: 'A term needs clarification', icon: CircleHelp, tone: 'amber' },
-    ]
-  }, [selectedRun])
-
-  const signIn = async (event: React.FormEvent) => {
-    event.preventDefault(); setAuthError('')
-    const candidate = draftToken.trim()
-    try {
-      const response = await fetch(`${API}/api/dashboard`, { headers: { 'X-Operator-Token': candidate } })
-      if (!response.ok) throw new Error(response.status === 401 ? 'That token was not accepted.' : 'The API is not reachable yet.')
-      sessionStorage.setItem('clickpe-operator-token', candidate); setToken(candidate); setDashboard(await response.json())
-    } catch (e) { setAuthError((e as Error).message) }
-  }
-
-  const upload = async (file?: File) => {
-    if (!file) return
-    if (!file.name.toLowerCase().endsWith('.csv')) { setUploadFeedback({ tone: 'error', message: 'Choose a .csv file.' }); return }
-    if (dashboard && file.size > dashboard.max_upload_bytes) { setUploadFeedback({ tone: 'error', message: 'That CSV exceeds the 25 MiB upload limit.' }); return }
-    setLoading(true); setError(''); setPreview(null)
-    setUploadFeedback({ tone: 'info', message: `Preparing ${file.name}…` })
-    let uploadStage: 'api' | 'storage' | 'processing' = 'api'
-    try {
-      let data: { upload_id: string }
-      if (dashboard?.storage_mode === 's3') {
-        const signed = await request(`/api/uploads?filename=${encodeURIComponent(file.name)}`, { method: 'POST' })
-        const form = new FormData()
-        Object.entries(signed.upload.fields as Record<string, string>).forEach(([key, value]) => form.append(key, value))
-        form.append('file', file)
-        uploadStage = 'storage'
-        setUploadFeedback({ tone: 'info', message: 'Sending the CSV to secure storage…' })
-        const uploaded = await fetch(signed.upload.url as string, { method: 'POST', body: form })
-        if (!uploaded.ok) throw new Error(`Storage rejected the CSV upload (HTTP ${uploaded.status}). Try again or share that status.`)
-        data = { upload_id: signed.upload_id as string }
-      } else {
-        const body = new FormData(); body.append('file', file)
-        data = await request('/api/uploads/local', { method: 'POST', body })
-      }
-      uploadStage = 'processing'
-      setUploadFeedback({ tone: 'info', message: `Upload received · ${data.upload_id.slice(0, 8)} · waiting for import…` })
-      const deadline = Date.now() + 60_000
-      while (Date.now() < deadline) {
-        const status = await request(`/api/uploads/${data.upload_id}`) as UploadStatus
-        if (status.status === 'failed') {
-          const detail = status.error_code ? uploadErrorMessages[status.error_code] || `Import failed (${status.error_code}).` : 'Import failed. Please try again.'
-          throw new Error(detail)
-        }
-        if (status.run_id) {
-          const run = await request(`/api/runs/${status.run_id}`) as Run
-          await refresh(status.run_id)
-          if (status.status === 'completed' || run.status === 'completed') {
-            setUploadFeedback({ tone: 'success', message: `Analysis complete · ${fmt(run.row_count)} applicant profiles processed.` })
-          } else if (run.status === 'failed') {
-            const detail = run.error_code ? uploadErrorMessages[run.error_code] || `Matching failed (${run.error_code}).` : 'Matching failed. Check the run details.'
-            setUploadFeedback({ tone: 'error', message: detail })
-          } else {
-            setUploadFeedback({ tone: 'success', message: `CSV imported · ${fmt(run.row_count)} profiles · matching is ${run.status}.` })
-          }
-          return
-        }
-        setUploadFeedback({ tone: 'info', message: status.status === 'processing' ? 'CSV received · importing applicant rows…' : 'CSV received · waiting for the importer…' })
-        await wait(1500)
-      }
-      setUploadFeedback({ tone: 'error', message: `Storage received the file, but import is not confirmed yet. Reference ${data.upload_id.slice(0, 8)}; refresh the workspace shortly.` })
-    } catch (e) {
-      const message = (e as Error).message
-      const networkMessage = uploadStage === 'api'
-        ? 'The browser could not reach the upload API. Check the failed Network request and try again.'
-        : uploadStage === 'storage'
-          ? 'The browser could not reach storage. Check the failed Network request and try again.'
-          : 'The file may be in storage, but the workspace could not check its import status. Refresh and retry if needed.'
-      setUploadFeedback({ tone: 'error', message: message === 'Failed to fetch' ? networkMessage : message })
-    }
-    finally { setLoading(false); if (fileInput.current) fileInput.current.value = '' }
-  }
-
-  const makePreview = async () => {
-    if (!selectedRun) return
-    try { setPreview(await request(`/api/runs/${selectedRun.run_id}/notification-preview`, { method: 'POST', body: '{}' })) }
-    catch (e) { setError((e as Error).message) }
-  }
-
-  const approvePolicy = async (policy: PendingPolicy) => {
-    try {
-      await request(`/api/policies/${policy.snapshot_id}/approve`, { method: 'POST', body: '{}' })
-      setError(`${policy.lender} policy approved · new analyses will use this version`)
-      await refresh()
-    } catch (e) { setError((e as Error).message) }
-  }
-
-  if (!token) return <main className="login-shell"><div className="login-card">
-    <div className="brand-mark"><Banknote size={20} strokeWidth={2.3} /></div>
-    <span className="eyebrow">CLICKPE · OPERATIONS</span>
-    <h1>Your loan eligibility workspace</h1>
-    <p>Sign in with the operator token configured for this demo. Applicant information is protected behind the API.</p>
-    <form onSubmit={signIn} className="login-form"><label htmlFor="operator-token">Operator token</label><input autoComplete="current-password" id="operator-token" type="password" value={draftToken} onChange={(e) => setDraftToken(e.target.value)} placeholder="Paste your operator token" required /><button className="button primary full" type="submit">Open workspace <ArrowRight size={16} /></button></form>
-    {authError && <div role="alert" className="alert error">{authError}</div>}
-    <div className="login-foot"><LockKeyhole size={14} />Token remains in this browser tab only</div>
-  </div><div className="login-side"><div className="login-side-brand"><div className="brand-mark light"><Banknote size={19} /></div><span>clickpe</span></div><div><span className="eyebrow">BETTER MATCHES. CLEARER REASONS.</span><h2>Turn lender criteria into thoughtful next steps.</h2><p>One transparent run at a time. Every match has a source, a rule and a reason you can review.</p></div><div className="login-side-bottom">A prototype workspace · decisions stay human-reviewed</div></div></main>
-
-  return <div className="app-shell">
-    <aside className="sidebar">
-      <div className="brand"><div className="brand-mark"><Banknote size={18} strokeWidth={2.3} /></div><span>clickpe</span><span className="workspace-chip">OPS</span></div>
-      <div className="sidebar-section"><div className="sidebar-label">WORKSPACE</div><button className="nav-item active"><FileChartColumn size={17} /><span>Overview</span></button><button className="nav-item" onClick={() => document.getElementById('run-detail')?.scrollIntoView({ behavior: 'smooth' })}><FolderClock size={17} /><span>Eligibility runs</span>{dashboard?.runs.length ? <span className="nav-count">{dashboard.runs.length}</span> : null}</button><button className="nav-item" onClick={() => document.getElementById('policy-review')?.scrollIntoView({ behavior: 'smooth' })}><Banknote size={17} /><span>Policy review</span>{pendingPolicies.length ? <span className="nav-count">{pendingPolicies.length}</span> : null}</button></div>
-      <div className="sidebar-spacer" />
-      <div className="side-note"><div className="side-note-icon"><Fingerprint size={16} /></div><div><strong>Privacy first</strong><p>Names and email addresses are never passed to the matching workflow.</p></div></div>
-      <button className="nav-item side-bottom" onClick={() => { sessionStorage.removeItem('clickpe-operator-token'); setToken(''); setDraftToken('') }}><LogOut size={16} /><span>Sign out</span></button>
-      <div className="sidebar-profile"><div className="avatar">O</div><div><strong>Operator</strong><span>Eligibility team</span></div><MoreHorizontal size={18} className="profile-more" /></div>
-    </aside>
-
-    <main className="main-area">
-      <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span className="crumb-slash">/</span><strong>Overview</strong></div><div className="topbar-right"><div className="system-status"><span className={dashboard?.relay_online ? "pulse" : ""} /> {error ? 'Connection needs attention' : !dashboard?.relay_online ? 'Worker offline' : dashboard.failed_events ? 'Runs need attention' : dashboard.pending_events ? 'Processing queue' : 'Worker online'}</div><button className="icon-button" title="Refresh dashboard" onClick={() => void refresh()}><RotateCw size={16} /></button><div className="top-avatar">O</div></div></header>
-      <div className="content">
-        <div className="page-heading"><div><div className="date-eyebrow">YOUR LENDING WORKSPACE</div><h1>Good to see you, Operator <span className="wave">✳</span></h1><p>Review your latest portfolio run and what comes next.</p></div><button className="button ghost refresh-wide" onClick={() => void refresh()}><RotateCw size={15} /> Refresh</button></div>
-
-        {error && <div className={`alert ${error.includes('accepted') ? 'success' : 'error'}`} role="status"><span>{error}</span><button aria-label="Dismiss" className="alert-dismiss" onClick={() => setError('')}><X size={15} /></button></div>}
-
-        <section className="metric-grid" aria-label="Selected run metrics">{metrics.map(({ label, value, caption, icon: Icon, tone }) => <article key={label} className="metric-card"><div className="metric-top"><span>{label}</span><div className={`metric-icon ${tone}`}><Icon size={17} /></div></div><div className="metric-value">{value}</div><div className="metric-caption">{caption}</div></article>)}</section>
-
-        <div className="workspace-grid">
-          <section className="panel upload-panel"><div className="panel-heading"><div><div className="section-kicker">NEW ANALYSIS</div><h2>Import applicant profiles</h2></div><span className="format-badge">CSV · UP TO 25 MB</span></div><p className="panel-desc">Upload the standard applicant file to evaluate profiles against the active lender policies.</p><div className={`dropzone ${dragging ? 'drag-over' : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={(e) => { e.preventDefault(); setDragging(false); void upload(e.dataTransfer.files[0]) }}><div className="upload-icon"><UploadCloud size={21} /></div><strong>{loading ? 'Preparing your upload…' : 'Drop your CSV file here'}</strong><span>or browse files from your device</span><button className="button primary browse-button" disabled={loading} onClick={() => fileInput.current?.click()}>{loading ? 'Uploading' : 'Browse files'} {!loading && <ArrowRight size={14} />}</button><input ref={fileInput} type="file" accept=".csv,text/csv" hidden onChange={(e) => void upload(e.target.files?.[0])} /></div>{uploadFeedback && <div role={uploadFeedback.tone === 'error' ? 'alert' : 'status'} className={`alert ${uploadFeedback.tone} upload-feedback`}>{uploadFeedback.message}</div>}<div className="privacy-note"><ShieldCheck size={15} /><span>Names and email addresses stay inside the application database. The matcher sees eligibility fields only.</span></div></section>
-
-          <section className="panel activity-panel"><div className="panel-heading"><div><div className="section-kicker">RECENT ACTIVITY</div><h2>Your latest runs</h2></div><button className="icon-button small" title="Refresh runs" onClick={() => void refresh()}><RotateCw size={15} /></button></div>{dashboard?.runs.length ? <div className="run-list">{dashboard.runs.slice(0, 5).map((run) => <button key={run.run_id} className={`run-row ${selectedRun?.run_id === run.run_id ? 'selected' : ''}`} onClick={() => { setSelectedRun(run); setPreview(null) }}><span className={`run-icon ${run.status}`}><FileText size={16} /></span><span className="run-meta"><strong>Portfolio analysis</strong><small>{fmt(run.row_count)} applicants · {relative(run.created_at)}</small></span><span className={`status-pill ${run.status}`}>{run.status === 'completed' ? <Check size={12} /> : run.status === 'processing' ? <span className="mini-pulse" /> : null}{run.status}</span><ChevronDown className="run-chevron" size={14} /></button>)}</div> : <div className="empty-activity"><span className="empty-icon"><FolderClock size={20} /></span><strong>No analysis runs yet</strong><span>Upload your first applicant CSV to get started.</span></div>}<button className="text-action" onClick={() => document.getElementById('run-detail')?.scrollIntoView({ behavior: 'smooth' })}>View selected run <ArrowRight size={14} /></button></section>
+  BrowserRouter,
+  Link,
+  NavLink,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+} from "react-router";
+import {
+  ArrowRight,
+  Banknote,
+  LayoutDashboard,
+  LogOut,
+  RefreshCw,
+  ShieldCheck,
+  Users,
+} from "lucide-react";
+import { Provider, useWorkspace } from "./workspace";
+import { API } from "./lib";
+import Overview from "./pages/Overview";
+import Applicants from "./pages/Applicants";
+import Policies from "./pages/Policies";
+function SignIn() {
+  const { setToken, authError } = useWorkspace(),
+    [draft, setDraft] = useState(""),
+    [error, setError] = useState(""),
+    [busy, setBusy] = useState(false);
+  return (
+    <main className="login">
+      <div className="login-card">
+        <div className="brand">
+          <Banknote />
+          clickpe
         </div>
-
-        {preview && <section className="alert preview-info" role="status"><div><strong>Preview ready</strong><span>{fmt(preview.eligible_matches)} eligible matches across {fmt(preview.distinct_email_addresses)} unique email addresses. This preview action sends no emails.</span></div><button className="alert-dismiss" onClick={() => setPreview(null)}><X size={16} /></button></section>}
-
-        <section className="panel results-panel" id="run-detail"><div className="results-heading"><div><div className="section-kicker">DECISION REVIEW</div><h2>{selectedRun ? 'Applicant results' : 'Results will appear here'}</h2><p>{selectedRun ? `Run ${selectedRun.run_id.slice(0, 8)} · ${fmt(selectedRun.row_count)} applicant profiles` : 'Select a completed analysis run to explore the matches.'}</p></div><div className="result-actions"><div className="filter-control"><Search size={14} /><select value={filter} onChange={(e) => setFilter(e.target.value as typeof filter)} aria-label="Filter results"><option value="all">All decisions</option><option value="eligible">Eligible</option><option value="review">Needs review</option><option value="ineligible">Do not qualify</option></select><ChevronDown size={14} /></div><button className="button outline" onClick={() => void makePreview()} disabled={!selectedRun || selectedRun.status !== 'completed'}><CirclePlay size={15} /> Notification preview</button></div></div>
-          {selectedRun?.status === 'processing' || selectedRun?.status === 'queued' ? <div className="processing-banner"><span className="loading-spinner" /><span><strong>Your results are on the way</strong><small>{fmt(selectedRun.processed_decisions || 0)} of {fmt(selectedRun.row_count * (selectedRun.product_count || 0))} decisions saved. This view refreshes automatically.</small></span><span className="processing-status">{selectedRun.status}</span></div> : null}
-          {selectedRun?.status === 'failed' && <div className="processing-banner error-banner"><span><strong>This run needs attention</strong><small>{uploadErrorMessages[selectedRun.error_code || ''] || 'The workflow could not finish. Retry to resume from the last saved batch.'}</small></span><button className="button outline" disabled={retrying} onClick={() => void retryRun()}>{retrying ? 'Retrying...' : 'Retry run'}</button></div>}
-          {resultsLoading && <p role="status" className="results-loading">Loading results...</p>}
-          {results.length ? <><div className="results-table-wrap"><table><thead><tr><th>APPLICANT ID</th><th>LENDER PRODUCT</th><th>DECISION</th><th>WHY THIS RESULT</th><th></th></tr></thead><tbody>{results.map((result) => <tr key={result.result_id}><td><span className="user-id">{result.user_id}</span></td><td><div className="product-cell"><div className="bank-icon"><Banknote size={15} /></div><span><strong>{result.lender}</strong><small>{result.product_name}</small></span></div></td><td><span className={`decision ${result.decision}`}>{result.decision === 'eligible' ? <BadgeCheck size={13} /> : result.decision === 'review' ? <CircleHelp size={13} /> : <ShieldCheck size={13} />}{result.decision === 'ineligible' ? 'Does not qualify' : result.decision === 'review' ? 'Needs review' : 'Eligible'}</span></td><td><span className="reason-text">{result.reasons.find((reason) => reason.status === 'fail')?.criterion?.replace('_', ' ') || result.reasons.find((reason) => reason.status === 'unknown' || reason.status === 'review')?.message || 'All confirmed criteria are met'}</span></td><td><button className="row-more" title="Decision details" onClick={() => setSelectedMatch(result)}><MoreHorizontal size={17} /></button></td></tr>)}</tbody></table></div><div className="table-footer"><span>Showing {fmt(page * 40 + 1)}-{fmt(page * 40 + results.length)} of {fmt(totalResults)} results</span><div className="pagination"><button className="button outline" disabled={page === 0 || resultsLoading} onClick={() => setPage((p) => p - 1)}>Previous</button><button className="button outline" disabled={(page + 1) * 40 >= totalResults || resultsLoading} onClick={() => setPage((p) => p + 1)}>Next</button></div></div></> : selectedRun?.status === 'completed' ? <div className="empty-results"><div className="empty-icon"><FileChartColumn size={19} /></div><strong>No results for this filter</strong><span>Choose another decision filter to explore this run.</span></div> : null}
-        </section>
-
-        <section id="policy-review" className="policy-review-section"><div className="lender-heading"><div><div className="section-kicker">HUMAN REVIEW</div><h2>Policy changes to review</h2><p>AI extracts source terms for review. It never changes a live rule by itself.</p></div><span className="review-count">{pendingPolicies.length} awaiting</span></div>{pendingPolicies.length ? <div className="pending-policy-grid">{pendingPolicies.map((policy) => <article className="pending-policy" key={policy.snapshot_id}><div className="pending-policy-top"><div className="lender-logo">{policy.lender === 'Axis Bank' ? 'A' : 'B'}</div><div><strong>{policy.lender} · {policy.product_name}</strong><span>Extracted {relative(policy.observed_at)} · {policy.model_provider} / {policy.model_name}</span></div></div><div className="criteria-chips">{policy.advertised_rate && <span><b>Advertised rate</b>{policy.advertised_rate}</span>}{Object.entries(policy.rules).filter(([key]) => key !== 'version' && key !== 'incomplete_eligibility').map(([key, rule]) => <span key={key}><b>{key.replace('_', ' ')}</b> {rule.kind === 'unknown' ? 'not found' : rule.kind === 'required' || rule.kind === 'preferred' ? `${rule.min ?? rule.status ?? ''}${rule.max ? `–${rule.max}` : ''}${rule.currency ? ` ${rule.currency}` : ''}${rule.kind === 'preferred' ? ' preferred' : ''}${rule.location_dependent ? ' · location based' : ''}` : rule.status}</span>)}</div><details className="source-evidence"><summary>Review source excerpt and criteria</summary><p>{policy.reviewer_note}</p><pre>{policy.source_excerpt}</pre><a href={policy.source_url} target="_blank" rel="noreferrer">Open official source <ArrowRight size={12} /></a></details><div className="pending-policy-actions"><span><ShieldCheck size={13} />Manual approval changes future runs</span><button className="button primary" onClick={() => void approvePolicy(policy)}><Check size={14} /> Approve criteria</button></div></article>)}</div> : <div className="empty-policy"><span className="source-count-dot" /><span>All active lender criteria have an approved source.</span></div>}</section>
-
-        <section id="lenders" className="lender-section"><div className="lender-heading"><div><div className="section-kicker">ACTIVE SOURCES</div><h2>Current policy catalogue</h2><p>New analyses pin these versions. Open a decision to see the policy used for that run.</p></div><span className="source-count"><span className="source-count-dot" />{dashboard?.products.length || 0} sources active</span></div><div className="lender-grid">{dashboard?.products.map((product, index) => <article key={product.product_id} className="lender-card"><div className={`lender-logo ${index ? 'bajaj' : 'axis'}`}>{index ? 'B' : 'A'}</div><div className="lender-copy"><strong>{product.lender}</strong><span>{product.product_name}</span>{product.advertised_rate && <span>Advertised rate: {product.advertised_rate}</span>}<a href={product.product_url} target="_blank" rel="noreferrer">Official eligibility page <ArrowRight size={12} /></a></div><div className="policy-verified"><span className="verified-dot" /><span>{product.extraction_status === 'approved' ? `Reviewed ${product.observed_at ? relative(product.observed_at) : 'baseline'}` : 'Needs review'}</span></div></article>)}</div></section>
-
-        <footer className="page-footer"><span>ClickPe eligibility workspace</span><span>Screening aid only · lender decisions remain independent</span><a href="mailto:hello@clickpe.ai">Need a hand? <CircleHelp size={13} /></a></footer>
+        <h1>Operations workspace</h1>
+        <p>
+          Sign in to import applicants, review matches and manage lender
+          policies.
+        </p>
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setBusy(true);
+            setError("");
+            try {
+              const r = await fetch(`${API}/api/dashboard`, {
+                headers: { "X-Operator-Token": draft.trim() },
+              });
+              if (!r.ok)
+                throw new Error(
+                  r.status === 401
+                    ? "That operator token was not accepted."
+                    : "The workspace is unavailable. Try again shortly.",
+                );
+              setToken(draft.trim());
+            } catch (e) {
+              setError((e as Error).message);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <label htmlFor="token">Operator token</label>
+          <input
+            id="token"
+            type="password"
+            required
+            autoComplete="current-password"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <button className="button primary" disabled={busy}>
+            {busy ? "Signing in…" : "Open workspace"}
+            <ArrowRight size={16} />
+          </button>
+        </form>
+        {(error || authError) && (
+          <p className="alert" role="alert">
+            {error || authError}
+          </p>
+        )}
+        <small>Your session is kept in this browser tab.</small>
       </div>
-    <dialog ref={detailDialog} className="decision-dialog" onClose={() => setSelectedMatch(null)} aria-labelledby="decision-title">
-      {selectedMatch && <><div className="dialog-heading"><div><div className="section-kicker">DECISION EVIDENCE</div><h2 id="decision-title">{selectedMatch.product_name}</h2><p>Applicant {selectedMatch.user_id} - {selectedMatch.decision}</p></div><button autoFocus className="icon-button" aria-label="Close decision details" onClick={() => setSelectedMatch(null)}><X size={20} /></button></div>
-      <dl className="snapshot-details"><div><dt>Policy snapshot</dt><dd>{selectedMatch.snapshot_id}</dd></div><div><dt>Rule version</dt><dd>{selectedMatch.rule_version}</dd></div><div><dt>Source observed</dt><dd>{new Date(selectedMatch.observed_at).toLocaleString('en-IN')}</dd></div></dl>
-      <a href={selectedMatch.source_url} target="_blank" rel="noreferrer">View official policy source</a>
-      <div className="evidence-list">{selectedMatch.reasons.map((reason, index) => <article key={index}><strong>{reason.criterion.replaceAll('_', ' ')} <span className={`decision ${reason.status === 'fail' ? 'ineligible' : reason.status === 'pass' ? 'eligible' : 'review'}`}>{reason.status}</span></strong><p>{reason.observed_value !== undefined ? `Observed: ${reason.observed_value}. ` : ''}{reason.required_value ? `Required: ${reason.required_value}. ` : ''}{reason.minimum !== undefined ? `Minimum: ${reason.minimum}${reason.currency ? ` ${reason.currency}` : ''}. ` : ''}{reason.maximum !== undefined ? `Maximum: ${reason.maximum}. ` : ''}{reason.preferred_minimum !== undefined ? `Preferred minimum: ${reason.preferred_minimum}. ` : ''}{reason.message}</p></article>)}</div></>}
-    </dialog>
     </main>
-  </div>
+  );
+}
+function Shell() {
+  const { token, setToken, error, refresh, job } = useWorkspace(),
+    location = useLocation();
+  if (!token) return <SignIn />;
+  const current =
+    location.pathname === "/policies"
+      ? "Policies"
+      : location.pathname === "/applicants"
+        ? "Applicants"
+        : "Overview";
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <Link className="brand" to="/overview">
+          <Banknote />
+          clickpe
+        </Link>
+        <span className="workspace-label">OPERATIONS</span>
+        <nav aria-label="Workspace">
+          <NavLink to="/overview">
+            <LayoutDashboard size={19} />
+            Overview
+          </NavLink>
+          <NavLink to="/applicants">
+            <Users size={19} />
+            Applicants
+          </NavLink>
+          <NavLink to="/policies">
+            <ShieldCheck size={19} />
+            Policies
+          </NavLink>
+          <button
+            className="mobile-signout"
+            aria-label="Sign out"
+            onClick={() => setToken("")}
+          >
+            <LogOut size={16} />
+          </button>
+        </nav>
+        <div className="sidebar-foot">
+          <span>Operator workspace</span>
+          <button onClick={() => setToken("")}>
+            <LogOut size={17} />
+            Sign out
+          </button>
+        </div>
+      </aside>
+      <div className="main">
+        <header className="topbar">
+          <span>
+            Workspace <span className="muted">/</span>{" "}
+            <strong>{current}</strong>
+          </span>
+          <button
+            className="icon-button"
+            aria-label="Refresh workspace"
+            onClick={() => void refresh()}
+          >
+            <RefreshCw size={17} />
+          </button>
+        </header>
+        <main className="content">
+          {error && (
+            <div role="alert" className="alert">
+              {error}
+              <button onClick={() => void refresh()}>Try again</button>
+            </div>
+          )}
+          {job && current !== "Overview" && (
+            <Link className="job-link" to="/overview">
+              {job.phase === "ready"
+                ? "Your applicants are ready"
+                : job.phase === "failed"
+                  ? "An upload needs attention"
+                  : `Processing ${job.filename}`}
+              <ArrowRight size={16} />
+            </Link>
+          )}
+          <Routes>
+            <Route path="/" element={<Navigate to="/overview" replace />} />
+            <Route path="/overview" element={<Overview />} />
+            <Route path="/applicants" element={<Applicants />} />
+            <Route path="/policies" element={<Policies />} />
+            <Route
+              path="*"
+              element={
+                <div className="empty">
+                  <h1>Page not found</h1>
+                  <Link to="/overview">Return to overview</Link>
+                </div>
+              }
+            />
+          </Routes>
+          <footer>ClickPe · Eligibility screening workspace</footer>
+        </main>
+      </div>
+    </div>
+  );
+}
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Provider>
+        <Shell />
+      </Provider>
+    </BrowserRouter>
+  );
 }

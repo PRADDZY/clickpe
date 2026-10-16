@@ -44,6 +44,21 @@ credentials = [
         "data": {"name": "X-Internal-Token", "value": token},
     },
 ]
+if settings.ses_role_arn and settings.ses_external_id_secret_arn:
+    credentials.append(
+        {
+            "id": "clickpe-ses",
+            "name": "ClickPe SES test sender",
+            "type": "awsAssumeRole",
+            "data": {
+                "region": settings.aws_region,
+                "useSystemCredentialsForRole": True,
+                "roleArn": settings.ses_role_arn,
+                "externalId": _secret(settings.ses_external_id_secret_arn),
+                "roleSessionName": "clickpe-n8n-ses",
+            },
+        }
+    )
 existing_path = root / "existing-workflows.json"
 existing = json.loads(existing_path.read_text()) if existing_path.exists() else []
 existing_nodes = {n["id"]: n for w in existing for n in w.get("nodes", [])}
@@ -81,13 +96,13 @@ for path in sorted(Path("/seed/workflows").glob("*.json")):
                     }
                 )
                 node["credentials"] = {"httpHeaderAuth": {"id": cid, "name": cid}}
-        # No SES credentials are fabricated. Preview remains fully operational.
         if node["type"] == "n8n-nodes-base.awsSes":
-            old = existing_nodes.get(node["id"], {}).get("credentials")
-            if old:
-                node["credentials"] = old
-            elif settings.notification_mode != "test":
-                node["disabled"] = True
+            ready = bool(settings.ses_role_arn and settings.ses_external_id_secret_arn)
+            if ready:
+                node["credentials"] = {
+                    "awsAssumeRole": {"id": "clickpe-ses", "name": "ClickPe SES test sender"}
+                }
+            node["disabled"] = settings.notification_mode != "test" or not ready
     discovery = path.name.startswith("01")
     if not discovery or all(
         n.get("credentials")

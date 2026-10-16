@@ -350,7 +350,7 @@ def upload_status(upload_id: str, _: str = Depends(require_operator)) -> dict[st
 @router.get("/api/runs/{run_id}")
 def run_status(run_id: str, _: str = Depends(require_operator)) -> dict[str, Any]:
     row = one_row(
-        "SELECT run_id::text,upload_id::text,status,row_count,distinct_users,duplicate_email_count,matched_count,unmatched_count,review_count,error_code,created_at,started_at,completed_at FROM run WHERE run_id=%s",
+        "SELECT run_id::text,upload_id::text,status,row_count,distinct_users,duplicate_email_count,matched_count,unmatched_count,review_count,error_code,created_at,started_at,completed_at,prefiltered_count,candidate_count,notification_mode FROM run WHERE run_id=%s",
         (run_id,),
     )
     if not row:
@@ -574,6 +574,9 @@ def save_match_batch(body: PersistBatchRequest) -> dict[str, Any]:
             for u in page["users"]
             for p in u["products"]
         }
+        expected.update(
+            (r["user_id"], r["product_id"], r["snapshot_id"]) for r in page["preclassified_results"]
+        )
         actual = {(r.user_id, r.product_id, r.snapshot_id) for r in body.results}
         if (
             actual != expected
@@ -611,7 +614,8 @@ def save_match_batch(body: PersistBatchRequest) -> dict[str, Any]:
             )
         cur.execute(
             "UPDATE run SET status=%s,cursor_user_id=%s,matched_count=%s,unmatched_count=%s,review_count=%s,"
-            "started_at=COALESCE(started_at,now()),completed_at=CASE WHEN %s THEN now() ELSE NULL END,error_code=NULL WHERE run_id=%s",
+            "started_at=COALESCE(started_at,now()),completed_at=CASE WHEN %s THEN now() ELSE NULL END,error_code=NULL,"
+            "prefiltered_count=prefiltered_count+%s,candidate_count=candidate_count+%s WHERE run_id=%s",
             (
                 state,
                 body.last_user_id,
@@ -619,6 +623,8 @@ def save_match_batch(body: PersistBatchRequest) -> dict[str, Any]:
                 counts["unmatched"],
                 counts["review"],
                 not body.has_more,
+                page["prefiltered_count"],
+                page["candidate_count"],
                 body.run_id,
             ),
         )

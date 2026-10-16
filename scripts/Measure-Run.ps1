@@ -16,6 +16,7 @@ try {
         decisions=$results.total; eligible=$run.matched_count
         ineligible=$run.unmatched_count; review=$run.review_count
         matching_elapsed_seconds=$elapsed; max_decisions_per_batch=400
+        sql_prefiltered_pairs=$run.prefiltered_count; n8n_candidate_pairs=$run.candidate_count
         llm_calls_per_applicant_product_pair=0
     } | ConvertTo-Json
 }
