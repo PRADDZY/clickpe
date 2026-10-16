@@ -5,6 +5,7 @@ $serverlessCli = Join-Path $projectRoot 'node_modules\.bin\serverless.cmd'
 $sourceStage = Join-Path $env:TEMP ("clickpe-source-" + [guid]::NewGuid().ToString('N'))
 $previousWebOrigin = [Environment]::GetEnvironmentVariable('WEB_ORIGIN', 'Process')
 $previousFrontendApiUrl = [Environment]::GetEnvironmentVariable('VITE_API_BASE_URL', 'Process')
+$previousHostImage = [Environment]::GetEnvironmentVariable('N8N_AMI_ID', 'Process')
 $previousNotificationEnv = @{}
 foreach ($key in @('NOTIFICATION_MODE','SES_SENDER','TEST_RECIPIENTS')) {
     $previousNotificationEnv[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
@@ -67,6 +68,13 @@ try {
         $existingStack = ($existingStackText -join "`n") | ConvertFrom-Json
         $existingApiOutput = $existingStack.Stacks[0].Outputs | Where-Object { $_.OutputKey -eq 'ApiBaseUrl' } | Select-Object -First 1
         if ($existingApiOutput) { $env:WEB_ORIGIN = $existingApiOutput.OutputValue }
+        $existingHostOutput = $existingStack.Stacks[0].Outputs | Where-Object { $_.OutputKey -eq 'N8nInstanceId' } | Select-Object -First 1
+        if ($existingHostOutput -and -not $env:N8N_AMI_ID) {
+            $hostImage = & aws ec2 describe-instances --profile $AwsProfile --region ap-south-1 --instance-ids $existingHostOutput.OutputValue --query 'Reservations[0].Instances[0].ImageId' --output text
+            if ($LASTEXITCODE -ne 0 -or $hostImage -notmatch '^ami-[a-f0-9]+$') { throw 'Could not preserve the existing n8n host image.' }
+            $env:N8N_AMI_ID = $hostImage
+            Write-Output 'Preserving the existing n8n host image. Set N8N_AMI_ID explicitly for a planned image upgrade.'
+        }
     }
 
     & uv export --locked --no-dev --no-hashes --no-emit-project --format requirements.txt --output-file requirements.txt
@@ -191,6 +199,8 @@ try {
     Write-Output ("Notification mode: {0}. Delivery requires verified, configured controlled recipients." -f $notificationMode)
 }
 finally {
+    if ($null -eq $previousHostImage) { Remove-Item Env:\N8N_AMI_ID -ErrorAction SilentlyContinue }
+    else { Set-Item Env:\N8N_AMI_ID $previousHostImage }
     foreach ($key in $previousNotificationEnv.Keys) {
         if ($null -eq $previousNotificationEnv[$key]) { Remove-Item "Env:\$key" -ErrorAction SilentlyContinue }
         else { Set-Item "Env:\$key" $previousNotificationEnv[$key] }

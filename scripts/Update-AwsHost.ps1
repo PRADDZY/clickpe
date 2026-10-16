@@ -23,7 +23,9 @@ foreach ($value in $notificationConfig.Values) {
 $encodedConfig = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($notificationConfig | ConvertTo-Json -Compress)))
 $commands = @(
     'set -eu',
+    'cloud-init status --wait',
     'cd /opt/clickpe',
+    'test -f docker-compose.yml && test -f .env',
     "aws s3 cp 's3://$BucketName/deployment/source.zip' /tmp/clickpe-next.zip --region ap-south-1 --only-show-errors",
     "echo '$BundleSha256  /tmp/clickpe-next.zip' | sha256sum -c -",
     'tar -czf /opt/clickpe/previous-source.tar.gz app migrations n8n scripts docker-compose.yml Dockerfile pyproject.toml',
