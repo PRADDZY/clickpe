@@ -20,7 +20,7 @@ Filter matched, no-match and needs-review applicants. Show one row per profile a
 
 ## 5:15-6:30 - SES test delivery
 
-Use a separate small completed run with three eligible applicants. Show Workflow C's per-applicant bundles, leased claims, pacing, send gate, personalized message, SES node, receipt callback and minute schedule. Show all three received messages with matched products and masked addresses. Explain that destinations come only from the verified allowlist. This section is deferred until SES verification; do not claim completion while delivery is disabled.
+Use a completed demo run sent to the two owned Gmail plus aliases required by the assignment. Alias verification and delivery are still pending. The base-address run `b29cae53-27cd-442f-bceb-6f42e48e6c02` already proves three personalized deliveries, confirmed in Spam by the user on 16 October, but does not demonstrate the aliases. Show Workflow C's per-applicant bundles, leased claims, pacing, send gate, personalized message, SES node, receipt callback and minute schedule. Show received messages with matched products and masked addresses without claiming Inbox placement. Explain that destinations come only from the verified allowlist and bulk analysis uses preview mode.
 
 ## 6:30-7:45 - Reliability and optimization
 
