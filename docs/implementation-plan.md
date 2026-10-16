@@ -1,16 +1,17 @@
 # Workspace completion
 
-Approved implementation plan, 15 October 2026. Submission deadline: 16 October, 15:00 IST.
+Approved implementation plan, 15 October 2026. Submission deadline corrected by the user on 16 October: **17 October 2026, 15:44 IST**, 72 hours after 14 October at 15:44 IST.
 
-- [ ] Three routes: Overview, Applicants, Policies; polished operator UI.
-- [ ] Real upload byte progress, import indicator, matching progress, route/reload tracking.
-- [ ] Grouped applicant API, accessible decision drawer, numbered pagination and filters.
-- [ ] SQL hard-rule pre-filter in n8n, complete explanations, candidate evaluation and parity tests.
+- [x] Three routes: Overview, Applicants, Policies; polished operator UI.
+- [x] Real upload byte progress, import indicator, matching progress, route/reload tracking.
+- [x] Grouped applicant API, accessible decision drawer, numbered pagination and filters.
+- [x] SQL hard-rule pre-filter in n8n, complete explanations, candidate evaluation and parity tests.
 - [ ] Daily discovery timezone, private provider setup, source-supported rates and review.
-- [ ] Per-applicant notification ledger, controlled recipients, SES role credentials and recovery.
+- [x] Per-applicant notification ledger, controlled recipients, SES role credentials and recovery.
 - [ ] Unit/integration checks, headed browser verification and measured benchmark.
 - [ ] Deploy matching revisions to Lambda and host; verify published workflows.
-- [ ] README, demo runbook and submission handoff.
+- [x] README and demo runbook.
+- [ ] Received-email demonstration, recorded video and submission handoff.
 
 ## Defaults
 
