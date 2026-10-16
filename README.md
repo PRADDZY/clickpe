@@ -171,6 +171,10 @@ A received email and test-inbox aliases are required by the assignment. On 16 Oc
 
 The stock n8n SES node discards detailed AWS error codes on its error output. Recognizable HTTP 429 errors receive bounded retry; generic HTTP 400/403 rejections require explicit recovery after correcting the cause. Transport ambiguity stays `uncertain`. The internal `POST /internal/v1/resume-notifications/{run_id}` operation requeues only deferred or definitively failed test deliveries; it never requeues sent, sending, uncertain or preview entries. Check SES before resolving an uncertain outcome. Legacy `test_delivery` receipts are retained for audit.
 
+## Discovery model
+
+The primary extraction model is `nvidia/nemotron-3-super-120b-a12b:free` on OpenRouter, selected by the user after the paid model returned an insufficient-credit error. On 16 October 2026 its [provider metadata](https://openrouter.ai/api/v1/models/nvidia/nemotron-3-super-120b-a12b:free/endpoints) advertises structured-output support. Requests retain the strict JSON schema, require provider parameter support, use a 4,000-token budget and low reasoning effort, and save the actual requested model with each proposal. Gemini remains the fallback. Both providers have two bounded attempts, a 60-second request timeout and a 2.5-second retry delay. Free endpoint availability and quotas can change; unsuccessful extraction leaves the approved catalogue intact.
+
 ## Workspace behavior
 
 The Overview page shows **Upload / Import / Match / Ready**. Transfer percentage comes from browser byte events; 100% transfer waits for storage confirmation. Import is indeterminate. Matching percentage comes from persisted decisions against pinned products. Confirmed jobs continue across route changes and resume after refresh; unfinished file transfers require selecting the file again.
