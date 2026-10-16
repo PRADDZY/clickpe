@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 WORKFLOW_DIR = Path(__file__).resolve().parents[1] / "n8n" / "workflows"
@@ -42,5 +43,40 @@ def test_notification_workflow_gates_ses_and_does_not_retry_sends():
     assert ses["parameters"]["toAddresses"] == ["={{ $json.recipient }}"]
     assert any(n["type"] == "n8n-nodes-base.if" for n in nodes)
     gate = workflow["connections"]["Controlled test delivery enabled?"]["main"]
-    assert gate[0][0]["node"] == ses["name"]
-    assert gate[1][0]["node"] == "Preview complete"
+    assert gate[0][0]["node"] == "Attach personalized message"
+    assert (
+        workflow["connections"]["Attach personalized message"]["main"][0][0]["node"] == ses["name"]
+    )
+    assert gate[1][0]["node"] == "Deliver applicants sequentially"
+    assert ses["parameters"]["authentication"] == "assumeRole"
+    assert any(n["type"] == "n8n-nodes-base.scheduleTrigger" for n in nodes)
+    assert any(n["name"] == "Reserve delivery before SES" for n in nodes)
+    assert next(n for n in nodes if n["name"] == "Record SES receipt")["retryOnFail"] is True
+
+
+def test_ses_generic_error_classification_preserves_ambiguous_sends():
+    workflow = json.loads(
+        (WORKFLOW_DIR / "03-prepare-notification-preview.json").read_text(encoding="utf-8")
+    )
+    code = next(
+        n["parameters"]["jsCode"] for n in workflow["nodes"] if n["name"] == "Classify send failure"
+    )
+    cases = {
+        "Bad request - please check your parameters": ("rejected", "rejected"),
+        "Forbidden - perhaps check your credentials?": ("rejected", "rejected"),
+        "The service is receiving too many requests from you": ("rejected", "throttled"),
+        "socket hang up": ("uncertain", "transport_error"),
+    }
+    result = subprocess.run(
+        [
+            "node",
+            "-e",
+            "const fs=require('fs');const {code,cases}=JSON.parse(fs.readFileSync(0,'utf8'));const f=new Function('$json','$',code);console.log(JSON.stringify(Object.keys(cases).map(error=>f({error},()=>({item:{json:{delivery_id:'fixture',claim_token:'fixture'}}})).json)));",
+        ],
+        input=json.dumps({"code": code, "cases": cases}),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    for row, expected in zip(json.loads(result.stdout), cases.values(), strict=True):
+        assert (row["outcome"], row["error_code"]) == expected

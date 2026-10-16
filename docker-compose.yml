@@ -54,8 +54,8 @@ services:
       N8N_HOST: n8n
       N8N_PORT: 5678
       N8N_PROTOCOL: http
-      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}
-      N8N_RUNNERS_ENABLED: "true"
+      WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
+      N8N_AWS_SYSTEM_CREDENTIALS_ACCESS_ENABLED: "true"
       N8N_RUNNERS_MODE: external
       N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
       N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN:-local-only-runner-token}

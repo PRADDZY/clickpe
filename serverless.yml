@@ -50,7 +50,7 @@ provider:
     S3_UPLOAD_BUCKET:
       Ref: ApplicantUploadBucket
     WEB_ORIGIN: ${env:WEB_ORIGIN, 'http://localhost:3000'}
-    NOTIFICATION_MODE: preview
+    NOTIFICATION_MODE: ${env:NOTIFICATION_MODE, 'preview'}
 
 package:
   artifact: .aws-build/loan-engine.zip
@@ -152,6 +152,10 @@ functions:
         Resource: '*'
 
 resources:
+  Description: ClickPe eligibility demo with private PostgreSQL, bounded CSV ingestion and self-hosted n8n workflows.
+  Metadata:
+    AWSToolsMetrics:
+      AWSAgentToolkit: aws-cloudformation@3
   Parameters:
     LatestAmazonLinux:
       Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
@@ -325,6 +329,17 @@ resources:
       Properties:
         Name: {Fn::Sub: '/clickpe/${sls:stage}/n8n-runner-token'}
         GenerateSecretString: {PasswordLength: 56, ExcludePunctuation: true}
+    SesExternalIdSecret:
+      Type: AWS::SecretsManager::Secret
+      Metadata:
+        com.aws.cloudformation.Context:
+          why: Separate external ID for the n8n SES role assumption.
+          must: Keep the generated value out of workflow exports and application bundles.
+      DeletionPolicy: Delete
+      UpdateReplacePolicy: Delete
+      Properties:
+        Name: {Fn::Sub: '/clickpe/${sls:stage}/ses-external-id'}
+        GenerateSecretString: {PasswordLength: 56, ExcludePunctuation: true}
 
     DatabaseSubnetGroup:
       Type: AWS::RDS::DBSubnetGroup
@@ -452,10 +467,55 @@ resources:
               Statement:
                 - Effect: Allow
                   Action: [secretsmanager:GetSecretValue]
-                  Resource: [{Ref: DatabaseSecret}, {Ref: InternalTokenSecret}, {Ref: N8nEncryptionSecret}, {Ref: RunnerSecret}]
+                  Resource: [{Ref: DatabaseSecret}, {Ref: InternalTokenSecret}, {Ref: N8nEncryptionSecret}, {Ref: RunnerSecret}, {Ref: SesExternalIdSecret}]
                 - Effect: Allow
                   Action: [s3:GetObject]
                   Resource: {Fn::Sub: '${ApplicantUploadBucket.Arn}/deployment/source.zip'}
+    SesSenderRole:
+      Type: AWS::IAM::Role
+      Metadata:
+        com.aws.cloudformation.Context:
+          why: Renewable SES credentials for the n8n host without IAM user access keys.
+          must: Restrict the sender and every recipient to the configured controlled identities.
+      Properties:
+        RoleName: {Fn::Sub: 'clickpe-ses-${sls:stage}'}
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal: {AWS: {Fn::GetAtt: [N8nHostRole, Arn]}}
+              Action: sts:AssumeRole
+              Condition:
+                StringEquals:
+                  sts:ExternalId: {Fn::Sub: '{{resolve:secretsmanager:${SesExternalIdSecret}:SecretString}}'}
+        Policies:
+          - PolicyName: SendOnlyControlledDemoEmail
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: ses:SendEmail
+                  Resource: {Fn::Sub: 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${env:SES_SENDER, "unconfigured@example.invalid"}'}
+                  Condition:
+                    StringEquals:
+                      ses:FromAddress: ${env:SES_SENDER, 'unconfigured@example.invalid'}
+                    ForAllValues:StringEquals:
+                      ses:Recipients: {Fn::Split: [',', '${env:TEST_RECIPIENTS, "unconfigured@example.invalid"}']}
+    SesAssumePolicy:
+      Type: AWS::IAM::Policy
+      Metadata:
+        com.aws.cloudformation.Context:
+          why: Separate policy avoids a dependency cycle between the host and SES roles.
+          must: Permit assumption of only the controlled SES sender role.
+      Properties:
+        PolicyName: AssumeControlledSesRole
+        Roles: [{Ref: N8nHostRole}]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: sts:AssumeRole
+              Resource: {Fn::GetAtt: [SesSenderRole, Arn]}
     N8nHostProfile:
       Type: AWS::IAM::InstanceProfile
       Properties:
@@ -463,9 +523,16 @@ resources:
         Roles: [{Ref: N8nHostRole}]
     N8nHost:
       Type: AWS::EC2::Instance
+      Metadata:
+        com.aws.cloudformation.Context:
+          why: Private operator access to the self-hosted n8n orchestration runtime.
+          must: Require IMDSv2 and allow a hop limit of two for Docker role credentials.
       Properties:
         ImageId: {Ref: LatestAmazonLinux}
         InstanceType: t4g.small
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
         SubnetId: {Ref: PublicSubnetA}
         SecurityGroupIds: [{Ref: HostSecurityGroup}]
         IamInstanceProfile: {Ref: N8nHostProfile}
@@ -552,3 +619,7 @@ resources:
       Value: {Ref: OperatorTokenSecret}
     InternalTokenSecretArn:
       Value: {Ref: InternalTokenSecret}
+    SesRoleArn:
+      Value: {Fn::GetAtt: [SesSenderRole, Arn]}
+    SesExternalIdSecretArn:
+      Value: {Ref: SesExternalIdSecret}
