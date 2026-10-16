@@ -33,3 +33,24 @@ uv run python -m scripts.benchmark_matching --applicants 10000 --products 50 --o
 ```
 
 Use the separate hosted 10,000-row CSV run for end-to-end evidence. Measure matching elapsed time from the saved run timestamps and retain its pinned product count, decision totals and pre-filter counters with `scripts/Measure-Run.ps1`.
+
+## Hosted assignment CSV
+
+Measured on 16 October 2026 against deployed revision `41f0ff2`. Run ID: `dbc3c908-6ef6-4e2d-ae02-b755321de963`. The file was uploaded through visible Chrome, imported through S3/SQS/Lambda and evaluated by the published n8n workflow with results persisted in RDS.
+
+| Measure | Result |
+|---|---:|
+| Applicants | 10,000 |
+| Pinned lender products | 2 |
+| Saved product decisions | 20,000 |
+| Eligible / ineligible / review decisions | 2,281 / 6,611 / 11,108 |
+| SQL hard failures | 6,611 |
+| Candidates sent to JavaScript | 13,389 |
+| Candidate reduction | 33.06% |
+| Matching elapsed time | 42.14 seconds |
+| Matched / review / unmatched applicants | 2,281 / 7,719 / 0 |
+| Notification previews / emails sent | 2,281 / 0 |
+| Largest permitted page | 400 decisions |
+| Model calls per applicant-product pair | 0 |
+
+Matching elapsed time is `completed_at - started_at` from the saved run. It includes matching orchestration and persistence; it excludes browser transfer and CSV import. This is one hosted observation, not a controlled before/after speed comparison. The candidate reduction differs from the synthetic catalogue because the two catalogues contain different rules and products. Preview mode sends no email.
