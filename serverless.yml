@@ -152,6 +152,10 @@ functions:
         Resource: '*'
 
 resources:
+  Description: ClickPe eligibility demo with private PostgreSQL, bounded CSV ingestion and self-hosted n8n workflows.
+  Metadata:
+    AWSToolsMetrics:
+      AWSAgentToolkit: aws-cloudformation@3
   Parameters:
     LatestAmazonLinux:
       Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
@@ -327,6 +331,10 @@ resources:
         GenerateSecretString: {PasswordLength: 56, ExcludePunctuation: true}
     SesExternalIdSecret:
       Type: AWS::SecretsManager::Secret
+      Metadata:
+        com.aws.cloudformation.Context:
+          why: Separate external ID for the n8n SES role assumption.
+          must: Keep the generated value out of workflow exports and application bundles.
       DeletionPolicy: Delete
       UpdateReplacePolicy: Delete
       Properties:
@@ -465,6 +473,10 @@ resources:
                   Resource: {Fn::Sub: '${ApplicantUploadBucket.Arn}/deployment/source.zip'}
     SesSenderRole:
       Type: AWS::IAM::Role
+      Metadata:
+        com.aws.cloudformation.Context:
+          why: Renewable SES credentials for the n8n host without IAM user access keys.
+          must: Restrict the sender and every recipient to the configured controlled identities.
       Properties:
         RoleName: {Fn::Sub: 'clickpe-ses-${sls:stage}'}
         AssumeRolePolicyDocument:
@@ -491,6 +503,10 @@ resources:
                       ses:Recipients: {Fn::Split: [',', '${env:TEST_RECIPIENTS, "unconfigured@example.invalid"}']}
     SesAssumePolicy:
       Type: AWS::IAM::Policy
+      Metadata:
+        com.aws.cloudformation.Context:
+          why: Separate policy avoids a dependency cycle between the host and SES roles.
+          must: Permit assumption of only the controlled SES sender role.
       Properties:
         PolicyName: AssumeControlledSesRole
         Roles: [{Ref: N8nHostRole}]
@@ -507,6 +523,10 @@ resources:
         Roles: [{Ref: N8nHostRole}]
     N8nHost:
       Type: AWS::EC2::Instance
+      Metadata:
+        com.aws.cloudformation.Context:
+          why: Private operator access to the self-hosted n8n orchestration runtime.
+          must: Require IMDSv2 and allow a hop limit of two for Docker role credentials.
       Properties:
         ImageId: {Ref: LatestAmazonLinux}
         InstanceType: t4g.small

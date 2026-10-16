@@ -40,7 +40,7 @@ try {
     Write-Output ("API health: {0}/health returned {1}" -f $consoleUrl, $health.status)
     Write-Output ("Operator token secret: {0}" -f $outputs.OperatorTokenSecretArn)
     Write-Output 'The console and API share HTTPS on the API Gateway origin. Sign-in requires the operator token.'
-    Write-Output 'Notifications remain preview-only.'
+    Write-Output 'Notification mode follows the deployed configuration; delivery requires verified controlled recipients.'
 }
 finally {
     if ($null -eq $previousApiUrl) {
