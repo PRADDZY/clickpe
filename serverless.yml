@@ -68,6 +68,7 @@ package:
 
 custom:
   uploadBucketName: clickpe-loan-${aws:accountId}-${aws:region}-${sls:stage}
+  defaultHostImage: {Ref: LatestAmazonLinux}
 
 functions:
   api:
@@ -528,7 +529,7 @@ resources:
           why: Private operator access to the self-hosted n8n orchestration runtime.
           must: Require IMDSv2 and allow a hop limit of two for Docker role credentials.
       Properties:
-        ImageId: {Ref: LatestAmazonLinux}
+        ImageId: ${env:N8N_AMI_ID, self:custom.defaultHostImage}
         InstanceType: t4g.small
         MetadataOptions:
           HttpTokens: required
