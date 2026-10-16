@@ -128,14 +128,18 @@ The command builds the React console into the Lambda package and serves the page
 Open n8n through a Systems Manager port-forwarding session:
 
 ```powershell
-aws ssm start-session --profile dpratik --region ap-south-1 --target INSTANCE_ID --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["5678"],"localPortNumber":["5678"]}'
+.\scripts\Open-N8n.ps1 -AwsProfile dpratik
 ```
+
+This resolves the current instance from CloudFormation and avoids PowerShell JSON quoting issues. Open `http://localhost:5678` and keep the tunnel terminal running. After a planned host replacement, complete the n8n owner setup again if prompted, then bind the OpenRouter and Gemini Header Auth credentials. Secrets Manager tokens and the RDS applicant data are preserved.
 
 The deployment updates the existing EC2 services through Systems Manager, imports stable workflow IDs, binds the internal API and RDS credentials, and publishes matching and notification workflows. It downloads the AWS RDS CA bundle and verifies database certificates for n8n. Existing external credential bindings are retained. Discovery is published when both provider credentials are configured; otherwise it stays unpublished with the curated baseline available for matching.
 
 Configure `OPENROUTER_API_KEY` and `GEMINI_API_KEY` privately in `/opt/clickpe/.env` (or bind the two provider Header Auth credentials in n8n), then rerun the host update. The owner account is still needed for accessing the n8n editor. The import updates the draft and publishing takes effect after n8n restarts.
 
 Before each host update, the previous source is retained in `/opt/clickpe/previous-source.tar.gz` and the previous workflow export in the n8n volume. On failure, stop the relay, inspect the SSM command, restore compatible source and workflow versions, and restart services. Database migrations are additive; do not drop the new tables during rollback.
+
+Deployment preserves the existing host's AMI and waits for cloud-init before taking a source backup or starting the rollout. Set `N8N_AMI_ID` explicitly only for a planned image replacement. The prototype's n8n editor account and credential metadata live on the host's local Docker volumes; an intentional replacement needs backup/restore or fresh owner setup. Applicant data and decisions remain in RDS.
 
 The `demo` stack is billable while it exists. Retention limits applicant-data exposure; it does not stop AWS resource charges. Before deleting the stack, remove its private `deployment/source.zip` artifact from the upload bucket. Also empty the Serverless Framework deployment bucket if stack deletion reports it is non-empty. Do not delete the stack until you have saved anything needed for your submission.
 
@@ -180,6 +184,8 @@ The assignment's product catalogue is represented by `product` plus immutable `p
 The n8n Postgres node screens confirmed mandatory employment, age, location-independent income and credit-score rules. Rejected pairs receive complete ordered findings directly from SQL; only survivors enter the JavaScript evaluator for advisory and unknown criteria. All pairs are persisted, and a page still contains at most 400 decisions. Server-computed candidate/rejection counters are updated only once per accepted cursor.
 
 This reduces candidate work in the JavaScript stage, not the asymptotic applicant-product comparisons performed by SQL. Report measured throughput and candidate reduction, not an invented complexity improvement. The parity fixture compares every decision and ordered finding against the frozen previous n8n implementation, including fractional thresholds, preferred criteria and unknown/location-dependent terms. `rules-v2-staged` identifies the new execution strategy.
+
+The isolated 10,000-applicant / 50-product benchmark compared 500,000 decisions with complete explanation parity and eliminated 75.96% of candidates before JavaScript. See [measured results and limitations](docs/benchmark.md); this component benchmark excludes persistence and n8n orchestration.
 
 ## Validation and submission
 
