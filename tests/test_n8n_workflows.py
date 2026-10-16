@@ -57,6 +57,66 @@ def test_discovery_provider_retries_are_bounded():
         assert node["parameters"]["options"]["timeout"] <= 60_000
 
 
+def test_discovery_rates_and_quotes_are_literal_source_choices():
+    workflow = json.loads(
+        (WORKFLOW_DIR / "01-discover-official-policies.json").read_text(encoding="utf-8")
+    )
+    codes = {
+        node["name"]: node["parameters"].get("jsCode", "") for node in workflow["nodes"]
+    }
+    script = """
+const {codes}=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const source={product_id:'fixture',lender:'Fixture lender',product_name:'Fixture loan',
+ product_url:'https://example.com',source_excerpt:
+ 'Personal loan interest rate starts at 10% p.a. to 30.50% p.a.\\nProcessing fee up to 4.13% payable at disbursement.\\nInterest rate is 10–30.50% p.a.\\nMinimum age 21 years.'};
+const base=new Function('$',codes['Build strict extraction request · Code'])(
+ ()=>({item:{json:source}})).json;
+const rate='starts at 10% p.a. to 30.50% p.a.';
+const parsed={employment:{kind:'unknown'},age:{kind:'unknown'},
+ monthly_income:{kind:'unknown'},credit_score:{kind:'unknown'},
+ advertised_rate:rate,rate_source_quote:'A paraphrased quote that is not in the source'};
+const validate=new Function('$json','$',codes['Validate primary extraction · Code']);
+const result=validate({choices:[{message:{content:JSON.stringify(parsed)}}]},
+ ()=>({item:{json:base}})).json;
+let rejected=false;
+try {validate({choices:[{message:{content:JSON.stringify({...parsed,advertised_rate:'10% to 30.5% p.a.'})}}]},
+ ()=>({item:{json:base}}));}catch{rejected=true;}
+const fallback=new Function('$',codes['Prepare Gemini fallback · Code'])(
+ ()=>({item:{json:base}})).json;
+const google=new Function('$json','$',codes['Validate Gemini extraction · Code'])(
+ {candidates:[{content:{parts:[{text:JSON.stringify(parsed)}]}}]},
+ ()=>({item:{json:fallback}})).json;
+console.log(JSON.stringify({schema:base.request.response_format.json_schema.schema,
+ rate_quotes:base.rate_quotes,
+ google_schema:fallback.request.generationConfig.responseSchema,result,google,rejected}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        input=json.dumps({"codes": codes}),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    rate = "starts at 10% p.a. to 30.50% p.a."
+    for schema in (data["schema"], data["google_schema"]):
+        assert rate in schema["properties"]["advertised_rate"]["enum"]
+        assert "4.13%" not in schema["properties"]["advertised_rate"]["enum"]
+        assert "10% to 30.5% p.a." not in schema["properties"]["advertised_rate"]["enum"]
+        assert "10–30.50% p.a." in schema["properties"]["advertised_rate"]["enum"]
+    assert not any("Processing fee" in quote for quote in data["rate_quotes"])
+    assert not any(
+        isinstance(value, str) and "4.13% pa" in value
+        for value in data["schema"]["properties"]["advertised_rate"]["enum"]
+    )
+    for policy in (data["result"], data["google"]):
+        assert policy["advertised_rate"] == rate
+        assert policy["rate_source_quote"] == (
+            "Personal loan interest rate starts at 10% p.a. to 30.50% p.a."
+        )
+    assert data["rejected"] is True
+
+
 def test_workflow_exports_are_valid_and_have_no_embedded_credentials():
     workflows = list(WORKFLOW_DIR.glob("*.json"))
     assert len(workflows) == 3
