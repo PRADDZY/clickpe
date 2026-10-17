@@ -143,10 +143,6 @@ Deployment preserves the existing host's AMI and waits for cloud-init before tak
 
 The `demo` stack is billable while it exists. Retention limits applicant-data exposure; it does not stop AWS resource charges. Before deleting the stack, remove its private `deployment/source.zip` artifact from the upload bucket. Also empty the Serverless Framework deployment bucket if stack deletion reports it is non-empty. Do not delete the stack until you have saved anything needed for your submission.
 
-## Demo recording outline
-
-The assignment's required 5–10 minute recording still needs to be made. Show the event flow, all three n8n workflows, an explained result, the received synthetic email, and the measured optimization. The full narration script is local and intentionally untracked.
-
 ## Main paths
 
 - `app/api/routes.py`: operator API, policy-review gates, workflow handoffs and notification previews.
