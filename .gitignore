@@ -26,7 +26,7 @@ requirements.txt
 demo-recording.*
 certs/
 .runtime/
-/docs/demo-script.md
+/docs/
 /scripts/
 output/playwright/
 .playwright-cli/

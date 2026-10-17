@@ -33,7 +33,7 @@ jobs:
         with:
           node-version: '22'
       - run: uv sync --locked --extra dev
-      - run: uv run ruff check app tests scripts/configure_n8n.py
+      - run: uv run ruff check app tests
       - run: uv run pytest
 
   frontend:
